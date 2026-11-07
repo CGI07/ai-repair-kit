@@ -179,3 +179,49 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# AI Repair Kit local development and private files
+/.test-work/
+/.vscode/
+.env.*
+!.env.example
+*.local.ini
+*.local.toml
+*.pem
+*.key
+*.pfx
+
+# Local Codex data and backups
+.codex/
+auth.json
+.codex-global-state.json*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.jsonl
+*.jsonl.zst
+*.arkd
+/recovery-backups/
+/artifacts/
+/screenshots/
+
+# Local installers, executables and virtual machine media
+*.exe
+*.msi
+*.msix
+*.msixbundle
+*.msixupload
+*.appx
+*.appxbundle
+*.iso
+*.vdi
+*.vhd
+*.vhdx
+*.vmdk
+*.vbox
+*.vbox-prev
+*.sav
+*.ova
+*.ovf
