@@ -8,9 +8,13 @@ The locally built candidate is unsigned and used for verification. The presence 
 
 The locally installed PySide6 Essentials and Shiboken 6.11.3 packages declare open-source license alternatives in their metadata, while their installed license directories list only `LicenseRef-Qt-Commercial.txt`. Review the exact artifacts and collect the applicable open-source notices and corresponding-source materials before shipping this build.
 
-## First public source release
+## First Windows prerelease
 
-The source checkout can be published separately from the Windows executable after the maintainer reviews Git history metadata, the included files, and the release notes. Use the source installation instructions in the README. Keep local binaries and lab evidence outside GitHub release assets. The version-specific cache operations remain available through an explicit preview and approval. Their evidence is synthetic, and independent verification in the Codex Desktop UI remains open.
+Build from a reviewed source revision and ship the Windows x64 ZIP, checksums, English notes and corresponding source for the same tag. The ZIP includes the Python runtime. Users obtain the required x64 Visual C++ Redistributable directly from Microsoft when needed. The [Windows guide](windows-quick-start.md) explains extraction and troubleshooting.
+
+The candidate workflow can run manually or on a version tag. It uses hash-pinned Windows wheels, runs the source tests and prepares a downloadable artifact with the ZIP, SHA-256 and source revision. A build or test failure stops artifact creation. The maintainer reviews the candidate and approves publication separately.
+
+The version-specific cache operations require an explicit preview and approval. Current recovery evidence comes from synthetic fixtures. Independent verification in Codex Desktop remains open.
 
 ## Before publishing binaries
 

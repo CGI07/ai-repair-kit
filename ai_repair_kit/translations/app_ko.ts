@@ -790,5 +790,25 @@ Only missing createdAt and updatedAt fields will be filled from matching SQLite 
             <source>Pending chat IDs also explicitly marked projectless: %1. These markers do not prove the original project membership. Preserve them for review.</source>
             <translation>마이그레이션 대기 중이면서 프로젝트 없음으로도 표시된 채팅 ID: %1개. 이 표시만으로 원래 프로젝트 소속을 판단할 수 없습니다. 검토를 위해 그대로 보존하세요.</translation>
         </message>
+        <message>
+            <source>Review support report</source>
+            <translation>지원 보고서 검토</translation>
+        </message>
+        <message>
+            <source>Review the codes and counts before sharing. The app does not send this report. Do not attach original logs, profiles, or backups.</source>
+            <translation>공유하기 전에 진단 코드와 수치를 확인하세요. 앱에서 보고서를 전송하지 않습니다. 원본 로그, 프로필, 백업은 첨부하지 마세요.</translation>
+        </message>
+        <message>
+            <source>Support report preview</source>
+            <translation>지원 보고서 미리보기</translation>
+        </message>
+        <message>
+            <source>Copy report</source>
+            <translation>보고서 복사</translation>
+        </message>
+        <message>
+            <source>Close report</source>
+            <translation>보고서 닫기</translation>
+        </message>
     </context>
 </TS>

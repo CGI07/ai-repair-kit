@@ -36,3 +36,9 @@ Backups are stored in the application's per-user local application data folder u
 - Codex documents its user configuration and storage overrides. [Config basics](https://learn.chatgpt.com/docs/config-file/config-basic) · [Environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables)
 - Codex parses the user config as TOML. A Windows report documents a configuration filled with NUL bytes and a startup failure. [Config loader source](https://github.com/openai/codex/blob/main/codex-rs/config/src/loader/mod.rs) · [Windows report #44374](https://github.com/openai/codex/issues/44374)
 - The read-only metadata checks follow the upstream index record and thread-table definitions. [Session index source](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/session_index.rs) · [SQLite thread schema](https://github.com/openai/codex/blob/main/codex-rs/state/migrations/0001_threads.sql)
+
+## When a check or repair does not resolve the problem
+
+Open **Diagnostics → Review support report** to see the app version, the last scan's diagnostic codes and counts, optional thread status, and any recognized operation result. Choose **Copy report** after reviewing it. Nothing is sent automatically. Include the Windows and Codex MSIX versions and explain whether the symptom persists after restarting Codex. Use [GitHub Issues](https://github.com/CGI07/ai-repair-kit/issues) for ordinary troubleshooting, and follow [the security policy](../SECURITY.md) for suspected data loss or unsafe writes.
+
+If the report shows an unsupported version or inadequate evidence, keep the original files and use the documented checks. A file-level repair result does not show whether Codex Desktop restored visibility. If rollback could not be verified, keep Codex closed and preserve the verified backup. Do not upload raw logs, cache files, databases, credentials, or transcripts.

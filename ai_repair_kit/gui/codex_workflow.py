@@ -5,11 +5,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QStandardPaths, Qt, QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from ..tools import codex, codex_diagnostics, codex_repair, desktop_repair
+from ..tools import codex, codex_diagnostics, codex_repair, desktop_repair, support_report
 from ..tools.codex_diagnostics import Code, Finding, Report
 from ..tools.desktop_catalog import canonical_id
 from ..tools.desktop_thread import (
@@ -67,6 +67,10 @@ class CodexWorkflow(QObject):
         diagnostics.addWidget(self.thread_button)
         self.thread_status = self.new_note()
         diagnostics.addWidget(self.thread_status)
+        self.support_button = QPushButton()
+        self.support_button.setObjectName("reviewSupportReport")
+        self.support_button.clicked.connect(self.review_support_report)
+        diagnostics.addWidget(self.support_button)
         self.desktop_repair.clicked.connect(lambda: self.change_desktop(False))
         self.desktop_history.clicked.connect(lambda: self.change_desktop(True))
 
@@ -309,6 +313,32 @@ class CodexWorkflow(QObject):
         dialog.deleteLater()
         return accepted
 
+    def review_support_report(self) -> None:
+        if self.future is not None or not (self.report or self.message in support_report.OUTCOMES):
+            return
+        report = support_report.format_report(self.report, self.thread_report, self.message)
+        dialog = QDialog(self.window)
+        dialog.setWindowTitle(self.tr("Review support report"))
+        dialog.resize(520, 370)
+        layout = QVBoxLayout(dialog)
+        note = self.new_note()
+        note.setText(self.tr("Review the codes and counts before sharing. The app does not send this report. Do not attach original logs, profiles, or backups."))
+        layout.addWidget(note)
+        preview = QPlainTextEdit(report)
+        preview.setAccessibleName(self.tr("Support report preview"))
+        preview.setReadOnly(True)
+        layout.addWidget(preview, 1)
+        buttons = QDialogButtonBox()
+        buttons.addButton(self.tr("Copy report"), QDialogButtonBox.ButtonRole.AcceptRole)
+        close = buttons.addButton(self.tr("Close report"), QDialogButtonBox.ButtonRole.RejectRole)
+        close.setDefault(True)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QApplication.clipboard().setText(report)
+        dialog.deleteLater()
+
     def update_controls(self) -> None:
         idle = self.future is None
         has_path = bool(self.path.text().strip())
@@ -330,6 +360,7 @@ class CodexWorkflow(QObject):
         can_check_thread = bool(self.report and self.report.db_home)
         self.thread_button.setVisible(can_check_thread)
         self.thread_button.setEnabled(idle and can_check_thread)
+        self.support_button.setEnabled(idle and bool(self.report or self.message in support_report.OUTCOMES))
 
     def render(self) -> None:
         self.update_controls()
@@ -339,6 +370,7 @@ class CodexWorkflow(QObject):
         self.desktop_repair.setText(self.tr("Preview project cache repair"))
         self.desktop_history.setText(self.tr("Preview recovery from a historical snapshot"))
         self.thread_button.setText(self.tr("Check a specific thread or Goal"))
+        self.support_button.setText(self.tr("Review support report"))
         thread_text = self.thread_report_text() if self.report else ""
         self.thread_status.setText(thread_text)
         self.thread_status.setVisible(bool(thread_text))

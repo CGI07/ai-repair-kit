@@ -2,7 +2,7 @@
 
 AI Repair Kit is a free, open-source Windows utility for troubleshooting OpenAI Codex Desktop. It diagnoses missing projects, broken chat and session links, and inaccessible Goal metadata, and previews a small set of documented configuration and Desktop cache repairs. Version **1.0.0rc2** is an early release candidate under development.
 
-[Recovery guide](docs/desktop-recovery.md) · [Changelog](CHANGELOG.md)
+[Download the Windows x64 prerelease](https://github.com/CGI07/ai-repair-kit/releases/tag/v1.0.0rc2) · [Windows installation](docs/windows-quick-start.md) · [Recovery guide](docs/desktop-recovery.md) · [Changelog](CHANGELOG.md)
 
 ![AI Repair Kit dashboard on Windows](docs/images/dashboard.png)
 
@@ -27,7 +27,9 @@ The [issue #42739 review](docs/issue-42739.md) covers all 79 comments checked on
 
 The intended platform is Windows 10 1809 or later or Windows 11, x64, with 64-bit Python 3.11 for source runs. [Qt platform requirements](https://doc.qt.io/qt-6.11/windows.html)
 
-In PowerShell, run these commands from a checkout. Reuse an existing healthy Python 3.11 virtual environment.
+Download the Windows x64 ZIP and SHA256SUMS.txt from the prerelease. Verify the checksum, use **Extract All**, and open AI-Repair-Kit.exe with _internal beside it. The ZIP includes Python. If needed, install the [Microsoft Visual C++ v14 Redistributable for x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version). See the [Windows installation guide](docs/windows-quick-start.md) for details.
+
+To run from source, use these PowerShell commands from a checkout. Reuse an existing healthy Python 3.11 virtual environment.
 
 ```powershell
 py -0p
@@ -36,7 +38,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m ai_repair_kit
 ```
 
-For a first source release, use the checkout instructions above. A local unsigned EXE can be built with the [packaging procedure](CONTRIBUTING.md#build-the-windows-candidate). Open `AI-Repair-Kit.exe` from the build directory and keep its `_internal` directory beside it. See the [distribution checklist](docs/distribution.md) for the binary release requirements.
+To build a local unsigned EXE, see the [packaging procedure](CONTRIBUTING.md#build-the-windows-candidate) and the [distribution checklist](docs/distribution.md).
 
 The interface starts in English. Choose English, Korean, or the Windows language in **Settings**. Language changes apply immediately and your selection is saved for the next launch.
 

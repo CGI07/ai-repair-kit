@@ -1,6 +1,7 @@
 """Tests for the v0.1 UI and its isolated application preferences."""
 
 import ast
+import json
 import re
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ from xml.etree import ElementTree
 from PySide6.QtCore import QLocale, QSettings, Qt, QTimer, QTranslator
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox, QPlainTextEdit
 
 from ai_repair_kit.gui import codex_workflow, window as window_module
 from ai_repair_kit.gui.theme import COLORS
@@ -116,6 +117,39 @@ class WindowTests(unittest.TestCase):
                 self.assertFalse(button.isEnabled())
         self.assertTrue(self.window.create_backup.isEnabled())
         self.assertIn("Desktop cache cases", self.window.diag_notice.text())
+
+    def test_support_report_previews_before_copy_and_omits_profile_path(self) -> None:
+        workflow = self.window.workflow
+        self.window.nav.setCurrentRow(1)
+        self.assertFalse(workflow.support_button.isEnabled())
+        workflow.path.setText(str(self.workspace / "private-fixture"))
+        workflow.start_scan()
+        workflow.future.result(timeout=15)
+        workflow.finish_scan()
+        self.assertTrue(workflow.support_button.isEnabled())
+        clipboard = self.app.clipboard()
+        previous = clipboard.text()
+        self.addCleanup(clipboard.setText, previous)
+        clipboard.setText("unchanged")
+        previews = []
+
+        def answer(role: QDialogButtonBox.ButtonRole) -> None:
+            dialog = QApplication.activeModalWidget()
+            preview = dialog.findChild(QPlainTextEdit)
+            previews.append((preview.toPlainText(), preview.isReadOnly()))
+            box = dialog.findChild(QDialogButtonBox)
+            next(button for button in box.buttons() if box.buttonRole(button) == role).click()
+
+        QTimer.singleShot(0, lambda: answer(QDialogButtonBox.ButtonRole.RejectRole))
+        workflow.support_button.click()
+        self.assertEqual(clipboard.text(), "unchanged")
+        QTimer.singleShot(0, lambda: answer(QDialogButtonBox.ButtonRole.AcceptRole))
+        workflow.support_button.click()
+        preview, read_only = previews[-1]
+        self.assertTrue(read_only)
+        self.assertEqual(clipboard.text(), preview)
+        self.assertEqual(json.loads(preview)["last_scan"], {"home_missing": 1})
+        self.assertNotIn("private-fixture", preview)
 
     def test_synthetic_scan_cancel_approve_and_rollback_in_the_ui(self) -> None:
         fixture = self.workspace / "codex-fixture"
