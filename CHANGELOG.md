@@ -2,6 +2,11 @@
 
 ## 1.0.0rc2 · Unreleased
 
+- Defaulted fresh installations to English while retaining saved language choices.
+- Added a bounded missing-project-timestamp repair for MSIX `26.903.8094.0` and recognized historical `.tmp-*` snapshots.
+- Reported pending chat IDs also marked projectless without inferring membership.
+- Reviewed all 79 comments available in Codex issue #42739 and documented unsupported cases.
+
 - Added read-only diagnosis of Desktop project, chat, rollout, and Goal metadata, including guarded Windows SQLite WAL snapshots.
 - Added preview, explicit approval, verified backup, and rollback for documented Desktop cache failure patterns. The supported MSIX builds and their separate conditions are in the [recovery guide](docs/desktop-recovery.md).
 - Added exact historical cache recovery for the incomplete-migration case reported on MSIX `26.1029.7803.0`. The guarded state database is evidence for this operation. Writes are limited to the Desktop cache.

@@ -1,9 +1,10 @@
-"""Recover the documented empty Codex Desktop project registry on Windows."""
+"""Recover documented Codex Desktop project cache failures on Windows."""
 
 import ctypes
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
@@ -24,7 +25,9 @@ from .desktop_history import (
 )
 
 SUPPORTED_BUILD = "26.911.7940.0"
-HISTORY_FILENAMES = (CACHE_NAME, CACHE_NAME + ".bak")
+TIMESTAMP_BUILD = "26.903.8094.0"
+REGISTRY_BUILDS = (SUPPORTED_BUILD, TIMESTAMP_BUILD)
+HISTORY_FILENAMES = (CACHE_NAME, CACHE_NAME + ".bak", CACHE_NAME + ".tmp-*")
 
 
 @dataclass(frozen=True)
@@ -82,9 +85,46 @@ def _candidate(db: sqlite3.Connection, cache: dict) -> tuple[bytes, int]:
     return data, len(registry)
 
 
+def _timestamp_candidate(db: sqlite3.Connection, cache: dict) -> tuple[bytes, int]:
+    registry = cache.get("local-projects")
+    if not isinstance(registry, dict) or not registry:
+        raise RepairError("desktop_ineligible")
+    reconstructed, _ = _candidate(db, dict(cache, **{"local-projects": {}}))
+    expected = decode_cache(reconstructed)["local-projects"]
+    if registry.keys() != expected.keys():
+        raise RepairError("desktop_ineligible")
+    assignments = cache.get("thread-project-assignments")
+    if assignments is not None and (not isinstance(assignments, dict) or any(
+        not isinstance(key, str) or key not in registry for key in assignments.values()
+    )):
+        raise RepairError("desktop_ineligible")
+    updated = {}
+    count = 0
+    for key, entry in registry.items():
+        template = expected[key]
+        if not isinstance(entry, dict) or any(
+            entry.get(field) != template[field] for field in ("id", "name", "rootPaths")
+        ):
+            raise RepairError("desktop_ineligible")
+        result = dict(entry)
+        for field in ("createdAt", "updatedAt"):
+            if field in entry and (type(entry[field]) is not int or entry[field] != template[field]):
+                raise RepairError("desktop_ineligible")
+            result.setdefault(field, template[field])
+        count += result != entry
+        updated[key] = result
+    if not count:
+        raise RepairError("desktop_ineligible")
+    candidate = dict(cache, **{"local-projects": updated})
+    data = (json.dumps(candidate, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
+    if decode_cache(data) != candidate:
+        raise RepairError("desktop_ineligible")
+    return data, count
+
+
 def _build_candidate(db: sqlite3.Connection, cache: dict, history: bytes | None, build: str):
     if history is None:
-        result, count = _candidate(db, cache)
+        result, count = _timestamp_candidate(db, cache) if build == TIMESTAMP_BUILD else _candidate(db, cache)
         return result, count, 0, 0
     if build == RECENT_HISTORY_BUILD and not matches_recent_history(cache):
         raise RepairError("desktop_ineligible")
@@ -107,13 +147,15 @@ def _check_database(home: Path, expected: Path, data: bytes | None,
 
 
 def _validate_history_path(home: Path, history: Path) -> None:
-    if history.name.casefold() not in HISTORY_FILENAMES or history == home / CACHE_NAME:
+    name = history.name.casefold()
+    temporary = re.fullmatch(re.escape(CACHE_NAME) + r"\.tmp-[a-z0-9_-]{1,128}", name)
+    if (name not in HISTORY_FILENAMES[:2] and not temporary) or history == home / CACHE_NAME:
         raise RepairError("desktop_snapshot_name")
 
 
 def prepare(home: Path, db_home: Path, build: str, history: Path | None = None, *,
             sqlite_override: Path | None = None) -> Plan:
-    if build not in (HISTORY_BUILDS if history else (SUPPORTED_BUILD,)):
+    if build not in (HISTORY_BUILDS if history else REGISTRY_BUILDS):
         raise RepairError("desktop_version")
     if history is not None:
         _validate_history_path(home, history)
@@ -276,6 +318,8 @@ def prepare_restore(home: Path, store: Path, backup_id: str) -> RestorePlan:
 def apply(plan: Plan, store: Path, *, approved: bool) -> str:
     if not approved:
         raise RepairError("approval_required")
+    if plan.build not in (HISTORY_BUILDS if plan.history is not None else REGISTRY_BUILDS):
+        raise RepairError("desktop_version")
     if plan.history is not None:
         _validate_history_path(plan.home, plan.history)
     with _mutex(plan.home), pinned_directory(plan.home):

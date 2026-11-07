@@ -255,9 +255,14 @@ def _migration_status(cache: dict, known: set[str] | None, counts: Counter[str])
         return
     counts["desktop_assignment_migration_pending"] += 1
     pending = local.get("pendingThreadAssignmentIds")
-    if (known is not None and isinstance(pending, list) and len(pending) <= ROW_LIMIT
+    if (isinstance(pending, list) and len(pending) <= ROW_LIMIT
             and all(canonical_id(key) for key in pending)):
-        counts["desktop_assignment_migration_orphans"] += len(set(pending) - known)
+        if known is not None:
+            counts["desktop_assignment_migration_orphans"] += len(set(pending) - known)
+        projectless = cache.get("projectless-thread-ids")
+        if (isinstance(projectless, list) and len(projectless) <= ROW_LIMIT
+                and all(canonical_id(key) for key in projectless)):
+            counts["desktop_assignment_projectless"] += len(set(pending) & set(projectless))
 
 
 def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
@@ -296,6 +301,10 @@ def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
         elif catalog and not isinstance(registry, dict):
             counts["desktop_cache_unavailable"] += 1
         elif isinstance(registry, dict):
+            counts["desktop_project_timestamps_missing"] += sum(
+                isinstance(entry, dict) and ("createdAt" not in entry or "updatedAt" not in entry)
+                for entry in registry.values()
+            )
             keys = legacy_keys(db)
             missing = sum(
                 len(keys.get(project_id, [])) == 1 and keys[project_id][0] not in registry

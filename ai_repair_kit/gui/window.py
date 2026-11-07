@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         self.nav.itemSelectionChanged.connect(self.sync_navigation_selection)
         self.nav.setCurrentRow(0)
         self.language.setCurrentIndex(
-            LANGUAGE_OPTIONS.index(read_choice(settings, "language", LANGUAGE_OPTIONS))
+            LANGUAGE_OPTIONS.index(read_choice(settings, "language", LANGUAGE_OPTIONS, default="en"))
         )
         self.theme.setCurrentIndex(
             THEME_OPTIONS.index(read_choice(settings, "theme", THEME_OPTIONS))

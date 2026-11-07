@@ -223,7 +223,7 @@ class CodexWorkflow(QObject):
             else:
                 if not self.report or not self.report.db_home:
                     return
-                builds = " / ".join(desktop_repair.HISTORY_BUILDS) if historical else desktop_repair.SUPPORTED_BUILD
+                builds = " / ".join(desktop_repair.HISTORY_BUILDS if historical else desktop_repair.REGISTRY_BUILDS)
                 version, entered = QInputDialog.getText(
                     self.window,
                     self.tr("Installed Codex Desktop package version"),
@@ -246,7 +246,10 @@ class CodexWorkflow(QObject):
                     home, self.report.db_home, version.strip(), history,
                     sqlite_override=self.report.sqlite_override,
                 )
-                preview = self.tr("Target: %1\nProjects to add: %2\nHistorical chat links to add: %3\nHistorical links left untouched: %4\nOnly the Desktop cache will change. The full cache will be backed up and verified first. Check Codex after restart.")
+                if plan.build == desktop_repair.TIMESTAMP_BUILD:
+                    preview = self.tr("Target: %1\nProjects with missing timestamps to update: %2\nOnly missing createdAt and updatedAt fields will be filled from matching SQLite records. Chat links and existing fields will be preserved. The full cache will be backed up and verified first. Check Codex after restart.")
+                else:
+                    preview = self.tr("Target: %1\nProjects to add: %2\nHistorical chat links to add: %3\nHistorical links left untouched: %4\nOnly the Desktop cache will change. The full cache will be backed up and verified first. Check Codex after restart.")
                 for placeholder, value in (("%2", plan.count), ("%3", plan.linked), ("%4", plan.skipped)):
                     preview = preview.replace(placeholder, str(value))
                 preview = preview.replace("%1", str(home / desktop_repair.CACHE_NAME))
@@ -317,7 +320,9 @@ class CodexWorkflow(QObject):
         self.restore.setEnabled(idle and has_path and self.backups.currentIndex() >= 0)
         codes = {item.code for item in self.report.findings} if self.report else set()
         can_preview = Code.DB_WAL_DIAGNOSTIC not in codes
-        self.desktop_repair.setVisible(can_preview and Code.DESKTOP_CACHE_EMPTY in codes)
+        self.desktop_repair.setVisible(can_preview and bool(codes & {
+            Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING,
+        }))
         pending_empty_cache = {Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING} <= codes
         self.desktop_history.setVisible(Code.DESKTOP_PROJECTS in codes and (can_preview or pending_empty_cache))
         self.desktop_repair.setEnabled(idle)
@@ -331,7 +336,7 @@ class CodexWorkflow(QObject):
         self.path.setPlaceholderText(self.tr("Codex data folder"))
         self.path.setAccessibleName(self.tr("Codex data folder"))
         self.detect_button.setText(self.tr("Detect paths"))
-        self.desktop_repair.setText(self.tr("Preview empty project cache repair"))
+        self.desktop_repair.setText(self.tr("Preview project cache repair"))
         self.desktop_history.setText(self.tr("Preview recovery from a historical snapshot"))
         self.thread_button.setText(self.tr("Check a specific thread or Goal"))
         thread_text = self.thread_report_text() if self.report else ""
@@ -468,7 +473,7 @@ class CodexWorkflow(QObject):
             "desktop_repaired": self.tr("Desktop cache written and verified. Restart Codex and confirm the project list and an old chat in the app."),
             "desktop_restored": self.tr("Original Desktop cache restored and verified."),
             "desktop_version": self.tr("This Desktop version is not supported by the selected recovery rule."),
-            "desktop_snapshot_name": self.tr("Choose a pre-incident copy of .codex-global-state.json or .codex-global-state.json.bak."),
+            "desktop_snapshot_name": self.tr("Choose a pre-incident .codex-global-state.json, .bak, or .tmp-* snapshot."),
             "desktop_ineligible": self.tr("The cache, schema or project evidence does not qualify for this rule. Keep your files and consult the user guide."),
             "desktop_busy": self.tr("Codex or ChatGPT may be running, or another repair holds the profile lock. Fully exit the apps and try again."),
             "thread_location_changed": self.tr("The Codex database location may have changed. Run diagnostics again before checking a thread."),
@@ -512,9 +517,11 @@ class CodexWorkflow(QObject):
             Code.DESKTOP_CACHE_EMPTY: self.tr("The Desktop project cache is empty although SQLite still has projects."),
             Code.DESKTOP_CACHE_UNAVAILABLE: self.tr("The Desktop cache is missing, invalid or unreadable. Preserve any prior snapshot and consult the user guide."),
             Code.DESKTOP_CACHE_INCOMPLETE: self.tr("SQLite projects absent from the Desktop cache: %1. A historical snapshot may help."),
+            Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING: self.tr("Project cache entries missing timestamp fields: %1. A version-specific repair may apply."),
             Code.DESKTOP_ROOT_SHARED: self.tr("Exact project roots shared by multiple SQLite project records: %1. Review the original registrations before re-adding folders."),
             Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING: self.tr("The Desktop cache marks project migration complete and chat assignment migration incomplete. Preserve the cache for review."),
             Code.DESKTOP_ASSIGNMENT_MIGRATION_ORPHANS: self.tr("Pending chat assignments whose threads are absent from the checked SQLite database: %1."),
+            Code.DESKTOP_ASSIGNMENT_PROJECTLESS: self.tr("Pending chat IDs also explicitly marked projectless: %1. These markers do not prove the original project membership. Preserve them for review."),
             Code.DESKTOP_UNASSIGNED: self.tr("Threads without a SQLite project link: %1. This can be normal for projectless chats."),
             Code.DESKTOP_CANDIDATES: self.tr("Unassigned threads with one exact registered root match: %1. A path match alone cannot authorize relinking."),
             Code.DESKTOP_DANGLING: self.tr("Thread links to absent SQLite projects: %1. Preserve the database for manual review."),

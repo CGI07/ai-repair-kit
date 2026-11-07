@@ -66,6 +66,17 @@ class DesktopFixture(unittest.TestCase):
     def plan(self):
         return repair.prepare(self.home, self.home, repair.SUPPORTED_BUILD)
 
+    def timestamp_cache(self):
+        data = json.loads(self.original)
+        data["local-projects"] = {
+            "legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)]},
+        }
+        data["thread-project-assignments"] = {THREAD: "legacy"}
+        data["project-order"] = ["legacy"]
+        data["unrelated"] = {"preserve": [1, 2, 3]}
+        self.cache.write_text(json.dumps(data), encoding="utf-8")
+        return self.cache.read_bytes()
+
     def historical(self, extra=None):
         snapshot = self.base / repair.CACHE_NAME
         data = {
@@ -114,6 +125,30 @@ class DesktopDiagnostics(DesktopFixture):
         result = scan()
         self.assertNotIn(Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING, result)
         self.assertNotIn(Code.DESKTOP_ASSIGNMENT_MIGRATION_ORPHANS, result)
+
+    def test_timestamp_and_pending_projectless_findings_are_read_only(self):
+        self.timestamp_cache()
+        cache = json.loads(self.cache.read_bytes())
+        cache["app-server-projects-migration-by-host"] = {"local": {
+            "projectsMigrated": True, "threadAssignmentsMigrated": False,
+            "pendingThreadAssignmentIds": [THREAD, THREAD, ORPHAN],
+        }}
+        cache["projectless-thread-ids"] = [THREAD, THREAD, ORPHAN]
+        self.cache.write_text(json.dumps(cache), encoding="utf-8")
+        before = {path: path.read_bytes() for path in (self.cache, self.state)}
+        report = inspect(self.home, self.home)
+        findings = {item.code: item.count for item in report.findings}
+        self.assertEqual(findings[Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING], 1)
+        self.assertEqual(findings[Code.DESKTOP_ASSIGNMENT_PROJECTLESS], 2)
+        self.assertNotIn(THREAD, repr(report.findings))
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertFalse(self.store.exists())
+        for invalid in ([THREAD, {}], [THREAD, "not-a-thread"], "unexpected"):
+            with self.subTest(projectless=invalid):
+                cache["projectless-thread-ids"] = invalid
+                self.cache.write_text(json.dumps(cache), encoding="utf-8")
+                findings = {item.code for item in inspect(self.home, self.home).findings}
+                self.assertNotIn(Code.DESKTOP_ASSIGNMENT_PROJECTLESS, findings)
 
     def test_exact_thread_presence_distinguishes_stores_and_preserves_bytes(self):
         goal_db = self.home / "goals_1.sqlite"
@@ -750,6 +785,195 @@ class DesktopWrites(DesktopFixture):
         self.closed = process_check.start()
         self.addCleanup(process_check.stop)
 
+    def test_timestamp_repair_changes_only_missing_fields_and_rolls_back(self):
+        original = self.timestamp_cache()
+        database = self.state.read_bytes()
+        plan = repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        self.assertEqual((plan.count, plan.linked, plan.skipped), (1, 0, 0))
+        self.assertEqual(self.cache.read_bytes(), original)
+        with self.assertRaisesRegex(RepairError, "^approval_required$"):
+            repair.apply(plan, self.store, approved=False)
+        self.assertFalse(self.store.exists())
+        key = repair.apply(plan, self.store, approved=True)
+        expected = json.loads(original)
+        expected["local-projects"]["legacy"].update(createdAt=10, updatedAt=20)
+        self.assertEqual(json.loads(self.cache.read_bytes()), expected)
+        self.assertEqual(repair._read_backup(self.store / "desktop", key)[1], original)
+        self.assertEqual(self.state.read_bytes(), database)
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.apply(plan, self.store, approved=True)
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        repair.restore(repair.prepare_restore(self.home, self.store, key), self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertEqual(self.state.read_bytes(), database)
+
+    def test_timestamp_repair_refuses_conflicting_or_incomplete_evidence(self):
+        original = json.loads(self.timestamp_cache())
+        variants = [
+            {"id": "different"}, {"name": "different"}, {"rootPaths": []},
+            {"createdAt": "10"}, {"createdAt": True}, {"createdAt": 11},
+            {"updatedAt": None}, {"updatedAt": 19},
+        ]
+        for change in variants:
+            with self.subTest(change=change):
+                candidate = json.loads(json.dumps(original))
+                candidate["local-projects"]["legacy"].update(change)
+                self.cache.write_text(json.dumps(candidate), encoding="utf-8")
+                before = self.cache.read_bytes()
+                with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                    repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+                self.assertEqual(self.cache.read_bytes(), before)
+        self.cache.write_text(json.dumps(original), encoding="utf-8")
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("INSERT INTO project_idempotency_keys VALUES ('alias', ?)", (CORE,))
+            db.commit()
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        self.assertFalse(self.store.exists())
+
+    def test_timestamp_repair_preserves_valid_existing_field_and_refuses_unknown_version(self):
+        cache = json.loads(self.timestamp_cache())
+        cache["local-projects"]["legacy"]["createdAt"] = 10
+        self.cache.write_text(json.dumps(cache), encoding="utf-8")
+        reference = repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        for version in ("26.1103.3517.0", "26.924.2738.0"):
+            with self.subTest(version=version), patch.object(repair, "read_cache") as read:
+                with self.assertRaisesRegex(RepairError, "^desktop_version$"):
+                    repair.prepare(self.home, self.home, version)
+                with self.assertRaisesRegex(RepairError, "^desktop_version$"):
+                    repair.apply(replace(reference, build=version), self.store, approved=True)
+                read.assert_not_called()
+        key = repair.apply(
+            repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD), self.store, approved=True
+        )
+        self.assertEqual(
+            json.loads(self.cache.read_bytes())["local-projects"]["legacy"],
+            {**cache["local-projects"]["legacy"], "updatedAt": 20},
+        )
+        repair.restore(repair.prepare_restore(self.home, self.store, key), self.store, approved=True)
+        self.assertEqual(json.loads(self.cache.read_bytes()), cache)
+
+    def test_timestamp_repair_detects_changed_database_and_preserves_backup_on_failure(self):
+        original = self.timestamp_cache()
+        plan = repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("UPDATE projects SET updated_at_ms=21")
+            db.commit()
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertFalse(self.store.exists())
+        plan = repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        with patch.object(repair, "_backup", side_effect=OSError("synthetic backup failure")):
+            with self.assertRaises(OSError):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        replace_file = repair._replace
+
+        def fail_after_write(*args):
+            replace_file(*args)
+            if args[1].suffix == ".new":
+                raise OSError("synthetic verification failure")
+
+        with patch.object(repair, "_replace", side_effect=fail_after_write):
+            with self.assertRaisesRegex(RepairError, "^rolled_back$"):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        key, = repair.list_backups(self.store, home=self.home)
+        self.assertEqual(repair._read_backup(self.store / "desktop", key)[1], original)
+
+    def test_timestamp_repair_refuses_sidecars_and_missing_roots(self):
+        self.timestamp_cache()
+        wal = self.state.with_name(self.state.name + "-wal")
+        wal.touch()
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        wal.unlink()
+        self.root.rmdir()
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.TIMESTAMP_BUILD)
+        self.assertFalse(self.store.exists())
+
+    def test_temporary_historical_snapshot_is_validated_locked_and_kept(self):
+        history = self.historical().rename(self.base / (repair.CACHE_NAME + ".tmp-20261107_abc123"))
+        historical = history.read_bytes()
+        plan = repair.prepare(self.home, self.home, repair.HISTORY_BUILD, history)
+        original_replace = repair._replace
+
+        def check_snapshot_lock(*args):
+            with self.assertRaises(OSError):
+                history.write_bytes(b"changed")
+            with self.assertRaises(OSError):
+                history.rename(history.with_name("moved.json"))
+            return original_replace(*args)
+
+        with patch.object(repair, "_replace", side_effect=check_snapshot_lock):
+            key = repair.apply(plan, self.store, approved=True)
+        self.assertEqual(history.read_bytes(), historical)
+        repair.restore(repair.prepare_restore(self.home, self.store, key), self.store, approved=True)
+        history.write_bytes(historical + b" ")
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.apply(plan, self.store, approved=True)
+        for name in (repair.CACHE_NAME + ".tmp-", repair.CACHE_NAME + ".tmp-auth.json"):
+            with self.subTest(name=name), patch.object(repair, "stable_file") as opened:
+                with self.assertRaisesRegex(RepairError, "^desktop_snapshot_name$"):
+                    repair.prepare(self.home, self.home, repair.HISTORY_BUILD, self.base / name)
+                opened.assert_not_called()
+
+    def test_timestamp_preview_cancel_approve_and_rollback_in_both_languages_and_themes(self):
+        from PySide6.QtCore import QSettings, QTimer
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from ai_repair_kit.gui import codex_workflow
+        from ai_repair_kit.gui.window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        database = self.state.read_bytes()
+        for language in ("en", "ko"):
+            for theme in ("light", "dark"):
+                with self.subTest(language=language, theme=theme):
+                    original = self.timestamp_cache()
+                    settings = QSettings(str(self.base / "timestamp-ui.ini"), QSettings.Format.IniFormat)
+                    settings.setValue("language", language)
+                    settings.setValue("theme", theme)
+                    window = MainWindow(app, settings, self.store)
+                    try:
+                        window.resize(1050, 720)
+                        window.show()
+                        window.nav.setCurrentRow(1)
+                        flow = window.workflow
+                        flow.path.setText(str(self.home))
+                        flow.start_scan()
+                        flow.future.result(timeout=20)
+                        flow.finish_scan()
+                        self.assertTrue(flow.desktop_repair.isVisible())
+                        previews = []
+
+                        def answer(role):
+                            dialog = QApplication.activeModalWidget()
+                            self.assertIsInstance(dialog, QMessageBox)
+                            previews.append(dialog.text())
+                            next(button for button in dialog.buttons()
+                                 if dialog.buttonRole(button) == role).click()
+
+                        with patch.object(codex_workflow.QInputDialog, "getText",
+                                          return_value=(repair.TIMESTAMP_BUILD, True)):
+                            QTimer.singleShot(0, lambda: answer(QMessageBox.ButtonRole.RejectRole))
+                            flow.desktop_repair.click()
+                            self.assertEqual(self.cache.read_bytes(), original)
+                            QTimer.singleShot(0, lambda: answer(QMessageBox.ButtonRole.AcceptRole))
+                            flow.desktop_repair.click()
+                        self.assertIn("createdAt", previews[-1])
+                        self.assertIn("updatedAt", previews[-1])
+                        self.assertEqual(self.state.read_bytes(), database)
+                        window.nav.setCurrentRow(2)
+                        QTimer.singleShot(0, lambda: answer(QMessageBox.ButtonRole.AcceptRole))
+                        window.restore.click()
+                        self.assertEqual(self.cache.read_bytes(), original)
+                    finally:
+                        window.close()
+                        app.removeTranslator(window.translations.translator)
+
     def test_sqlite_redirect_invalidates_preview_and_approval(self):
         config = self.home / "config.toml"
         old_report = inspect(self.home)
@@ -976,17 +1200,17 @@ class DesktopWrites(DesktopFixture):
         self.assertIn(repair.HISTORY_BUILD, version_prompt.call_args.args[2])
         self.assertIn("Historical chat links to add: 1", previews[-1])
         self.assertIn("Historical links left untouched: 1", previews[-1])
-        self.assertEqual(picker.call_args.args[3], f"Desktop cache snapshots ({repair.CACHE_NAME} {repair.CACHE_NAME}.bak)")
+        self.assertEqual(picker.call_args.args[3], f"Desktop cache snapshots ({repair.CACHE_NAME} {repair.CACHE_NAME}.bak {repair.CACHE_NAME}.tmp-*)")
         with patch.object(
             codex_workflow.QInputDialog, "getText", return_value=(repair.HISTORY_BUILD, True)
         ), patch.object(
             codex_workflow.QFileDialog, "getOpenFileName", return_value=(str(self.home / "auth.json"), "")
         ):
             flow.desktop_history.click()
-            self.assertEqual(flow.message_text(), "Choose a pre-incident copy of .codex-global-state.json or .codex-global-state.json.bak.")
+            self.assertEqual(flow.message_text(), "Choose a pre-incident .codex-global-state.json, .bak, or .tmp-* snapshot.")
             window.language.setCurrentIndex(2)
             window.theme.setCurrentIndex(1)
-            self.assertEqual(flow.message_text(), "문제가 발생하기 전에 보관한 .codex-global-state.json 또는 .codex-global-state.json.bak 사본을 선택하세요.")
+            self.assertEqual(flow.message_text(), "문제가 발생하기 전의 .codex-global-state.json, .bak 또는 .tmp-* 스냅샷을 선택하세요.")
         self.assertEqual(self.cache.read_bytes(), self.original)
         self.assertFalse(self.store.exists())
 

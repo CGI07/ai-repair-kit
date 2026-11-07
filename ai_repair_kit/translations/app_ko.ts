@@ -371,10 +371,6 @@ Restore %2 original NUL bytes from the selected backup. This restores the origin
             <translation>지원 경로 또는 형식을 벗어난 세션 참조: %1개</translation>
         </message>
         <message>
-            <source>Preview empty project cache repair</source>
-            <translation>빈 프로젝트 캐시 복구 미리보기</translation>
-        </message>
-        <message>
             <source>Preview recovery from a historical snapshot</source>
             <translation>과거 스냅샷에서 복구 미리보기</translation>
         </message>
@@ -437,10 +433,6 @@ Restore %3 bytes (SHA-256: %4). The current cache will be backed up and verified
         <message>
             <source>This Desktop version is not supported by the selected recovery rule.</source>
             <translation>이 Desktop 버전에는 선택한 복구 규칙을 적용할 수 없습니다.</translation>
-        </message>
-        <message>
-            <source>Choose a pre-incident copy of .codex-global-state.json or .codex-global-state.json.bak.</source>
-            <translation>문제가 발생하기 전에 보관한 .codex-global-state.json 또는 .codex-global-state.json.bak 사본을 선택하세요.</translation>
         </message>
         <message>
             <source>The cache, schema or project evidence does not qualify for this rule. Keep your files and consult the user guide.</source>
@@ -773,6 +765,30 @@ Restore %3 bytes (SHA-256: %4) from the verified displaced original. The current
         <message>
             <source>Both stores have a Goal record, but their IDs could not be compared.</source>
             <translation>두 저장소 모두 Goal 기록이 있지만 ID를 대조할 수 없습니다.</translation>
+        </message>
+        <message>
+            <source>Target: %1
+Projects with missing timestamps to update: %2
+Only missing createdAt and updatedAt fields will be filled from matching SQLite records. Chat links and existing fields will be preserved. The full cache will be backed up and verified first. Check Codex after restart.</source>
+            <translation>대상: %1
+타임스탬프 누락을 보완할 프로젝트: %2개
+일치하는 SQLite 기록에서 누락된 createdAt 및 updatedAt 필드만 채웁니다. 채팅 연결과 기존 필드는 보존합니다. 먼저 전체 캐시를 백업하고 검증합니다. Codex를 다시 시작한 후 결과를 확인하세요.</translation>
+        </message>
+        <message>
+            <source>Preview project cache repair</source>
+            <translation>프로젝트 캐시 복구 미리보기</translation>
+        </message>
+        <message>
+            <source>Choose a pre-incident .codex-global-state.json, .bak, or .tmp-* snapshot.</source>
+            <translation>문제가 발생하기 전의 .codex-global-state.json, .bak 또는 .tmp-* 스냅샷을 선택하세요.</translation>
+        </message>
+        <message>
+            <source>Project cache entries missing timestamp fields: %1. A version-specific repair may apply.</source>
+            <translation>타임스탬프 필드가 없는 프로젝트 캐시 항목: %1개. 특정 버전용 복구를 적용할 수 있습니다.</translation>
+        </message>
+        <message>
+            <source>Pending chat IDs also explicitly marked projectless: %1. These markers do not prove the original project membership. Preserve them for review.</source>
+            <translation>마이그레이션 대기 중이면서 프로젝트 없음으로도 표시된 채팅 ID: %1개. 이 표시만으로 원래 프로젝트 소속을 판단할 수 없습니다. 검토를 위해 그대로 보존하세요.</translation>
         </message>
     </context>
 </TS>

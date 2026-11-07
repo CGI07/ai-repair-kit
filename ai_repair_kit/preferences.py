@@ -5,9 +5,10 @@ from PySide6.QtCore import QSettings
 THEME_OPTIONS = ("light", "dark")
 
 
-def read_choice(settings: QSettings, key: str, options: tuple[str, ...]) -> str:
+def read_choice(settings: QSettings, key: str, options: tuple[str, ...],
+                *, default: str | None = None) -> str:
     value = settings.value(key)
-    return value if isinstance(value, str) and value in options else options[0]
+    return value if isinstance(value, str) and value in options else default or options[0]
 
 
 def save_preferences(settings: QSettings, language: str, theme: str) -> bool:

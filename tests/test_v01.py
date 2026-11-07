@@ -167,6 +167,36 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(labels, ["취소", "변경 승인", f"대상: {target}"])
         self.assertIn("원본 바이트를 복원하고 검증했습니다", workflow.backup_status.text())
 
+    def test_startup_uses_english_unless_a_language_was_selected(self) -> None:
+        choices = [
+            (None, "en", "Dashboard"),
+            ("unsupported", "en", "Dashboard"),
+            ("en", "en", "Dashboard"),
+            ("ko", "ko", "대시보드"),
+            ("system", "system", "대시보드"),
+        ]
+        for theme in ("light", "dark"):
+            for saved, expected, title in choices:
+                with self.subTest(theme=theme, language=saved):
+                    self.settings.remove("language")
+                    if saved is not None:
+                        self.settings.setValue("language", saved)
+                    self.settings.setValue("theme", theme)
+                    with patch("ai_repair_kit.i18n.QLocale.system", return_value=QLocale("ko_KR")):
+                        reopened = MainWindow(self.app, self.settings, self.workspace / "backups")
+                    try:
+                        self.assertEqual(
+                            window_module.LANGUAGE_OPTIONS[reopened.language.currentIndex()], expected
+                        )
+                        self.assertEqual(reopened.nav.item(0).text(), title)
+                        self.assertEqual(
+                            self.app.palette().color(QPalette.ColorRole.Window).name(),
+                            COLORS[theme]["canvas"],
+                        )
+                    finally:
+                        reopened.close()
+                        self.app.removeTranslator(reopened.translations.translator)
+
     def test_live_language_change_keeps_current_page(self) -> None:
         self.window.nav.setCurrentRow(3)
         self.window.language.setCurrentIndex(2)
