@@ -1,8 +1,8 @@
 # AI Repair Kit — OpenAI Codex Desktop troubleshooting for Windows
 
-AI Repair Kit is a free, open-source Windows utility for troubleshooting OpenAI Codex Desktop. It diagnoses missing projects, broken chat and session links, and inaccessible Goal metadata, and previews a small set of documented configuration and Desktop cache repairs. Version **1.0.0rc2** is an early release candidate under development.
+AI Repair Kit is a free, open-source Windows utility for troubleshooting OpenAI Codex Desktop. It diagnoses missing projects, broken chat and session links, and inaccessible Goal metadata, and previews a small set of documented configuration and Desktop cache repairs. This source describes the **1.0.0rc3** Windows x64 prerelease candidate.
 
-[Download the Windows x64 prerelease](https://github.com/CGI07/ai-repair-kit/releases/tag/v1.0.0rc2) · [Windows installation](docs/windows-quick-start.md) · [Recovery guide](docs/desktop-recovery.md) · [Changelog](CHANGELOG.md)
+[Download a Windows x64 prerelease](https://github.com/CGI07/ai-repair-kit/releases) · [Windows installation](docs/windows-quick-start.md) · [Recovery guide](docs/desktop-recovery.md) · [Changelog](CHANGELOG.md)
 
 ![AI Repair Kit dashboard on Windows](docs/images/dashboard.png)
 
@@ -21,7 +21,9 @@ The version-specific repairs change only the Desktop JSON cache. A matching proj
 
 The application has been tested on Windows 10 x64 and an offline Windows 11 x64 guest. The tests cover synthetic profiles, including metadata created by the official bundled Codex App Server. Results from independent public incident reports and the lab's own results are recorded separately. [Windows VM verification](docs/desktop-vm-verification.md)
 
-The [issue #42739 review](docs/issue-42739.md) covers all 79 comments checked on November 7, 2026, including failed workarounds, different account/profile cases, and repairs that disappeared after restart. Each recovery rule applies only to its documented evidence and version. The [research roadmap](docs/research-roadmap.md) records related reports, evidence gaps and development priorities.
+The [issue #42739 review](docs/issue-42739.md) covers all 81 comments checked on November 8, 2026. It separates the common Desktop catalog mismatch from different profile, account and data failures. Each recovery rule applies only to its documented evidence and version. The [research roadmap](docs/research-roadmap.md) records related reports, evidence gaps and development priorities.
+
+The [security and build verification notes](SECURITY.md) describe what the application reads, what it can write after approval, and how to check the download or build it from source. MSIX `26.915.4065.0`, `26.924.2738.0`, and `26.1103.4239.0` are diagnostic-only in rc3. For `26.1103.4239.0`, the lab verified that two synthetic projects and their chats stayed visible after an offline restart. Desktop recovery after applying a repair remains unverified on these builds.
 
 ## Run on Windows
 

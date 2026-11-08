@@ -12,7 +12,7 @@ Push-Location -LiteralPath $project
 try {
     & $python -c 'import struct, sys; sys.exit(0 if sys.platform == "win32" and sys.version_info[:2] == (3, 11) and struct.calcsize("P") == 8 else 1)'
     if ($LASTEXITCODE -ne 0) { throw 'Windows with 64-bit Python 3.11 is required.' }
-    foreach ($directory in @('build', 'build\pyinstaller', 'build\pyinstaller-cache', 'dist')) {
+    foreach ($directory in @('build', 'build\pyinstaller', 'build\pyinstaller-cache', 'build\sqlite-runtime', 'dist')) {
         if ((Test-Path -LiteralPath $directory) -and
             ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Build paths cannot be links or junctions: $directory"
@@ -41,6 +41,8 @@ try {
     }
     # This local Widgets app needs neither Mesa OpenGL nor the optional Qt TLS providers.
     $internal = 'dist\AI-Repair-Kit\_internal'
+    & $Python scripts\prepare_windows_sqlite.py (Join-Path $internal 'sqlite3.dll')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stage the pinned SQLite runtime.' }
     $optionalFiles = @(
         'PySide6\opengl32sw.dll',
         'PySide6\plugins\tls\qcertonlybackend.dll',

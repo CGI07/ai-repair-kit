@@ -33,6 +33,18 @@ FILE_ONLY = str(UUID(int=204))
 
 class DesktopFixture(unittest.TestCase):
     def setUp(self):
+        package_probe = patch(
+            "ai_repair_kit.tools.codex_diagnostics.installed_desktop_version", return_value=None,
+        )
+        package_probe.start()
+        self.addCleanup(package_probe.stop)
+        repair_probe = patch.object(repair, "installed_desktop_version", return_value=repair.SUPPORTED_BUILD)
+        self.installed_desktop_version = repair_probe.start()
+        self.addCleanup(repair_probe.stop)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("CODEX_HOME", None)
         WORK.mkdir(exist_ok=True)
         work = TemporaryDirectory(dir=WORK)
         self.addCleanup(work.cleanup)
@@ -67,6 +79,7 @@ class DesktopFixture(unittest.TestCase):
         return repair.prepare(self.home, self.home, repair.SUPPORTED_BUILD)
 
     def timestamp_cache(self):
+        self.installed_desktop_version.return_value = repair.TIMESTAMP_BUILD
         data = json.loads(self.original)
         data["local-projects"] = {
             "legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)]},
@@ -78,6 +91,8 @@ class DesktopFixture(unittest.TestCase):
         return self.cache.read_bytes()
 
     def historical(self, extra=None):
+        if self.installed_desktop_version.return_value == repair.SUPPORTED_BUILD:
+            self.installed_desktop_version.return_value = repair.HISTORY_BUILD
         snapshot = self.base / repair.CACHE_NAME
         data = {
             "local-projects": {"legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)]}},
@@ -91,6 +106,23 @@ class DesktopFixture(unittest.TestCase):
 
 
 class DesktopDiagnostics(DesktopFixture):
+    def test_release_refuses_preview_and_apply_for_diagnostic_only_builds(self):
+        original = self.plan()
+        for build, history in (
+            (repair.PARTIAL_REGISTRY_BUILD, None),
+            (repair.OBJECT_LINK_BUILD, self.base / repair.CACHE_NAME),
+            ("26.1103.4239.0", None),
+        ):
+            with self.subTest(build=build):
+                self.installed_desktop_version.return_value = build
+                with self.assertRaisesRegex(RepairError, "^desktop_version$"):
+                    repair.prepare(self.home, self.home, build, history)
+                with self.assertRaisesRegex(RepairError, "^desktop_version$"):
+                    repair.apply(replace(original, build=build, history=history),
+                                 self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+        self.assertFalse(self.store.exists())
+
     def test_reports_local_migration_and_shared_roots_without_relinking(self):
         with closing(sqlite3.connect(self.state)) as db:
             db.execute("INSERT INTO projects VALUES (?, 'Other fixture', 1, 20, 30)", (FILE_ONLY,))
@@ -425,6 +457,39 @@ class DesktopDiagnostics(DesktopFixture):
         self.assertEqual(files(), before)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows file-sharing guards")
+    def test_checkpointed_empty_wal_is_available_only_to_read_only_diagnostics(self):
+        from ai_repair_kit.tools.desktop_catalog import SnapshotHasSidecars, open_snapshot
+
+        source = self.base / "state-source.sqlite"
+        shutil.copyfile(self.state, source)
+        with closing(sqlite3.connect(source)) as db:
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("UPDATE threads SET project_id=? WHERE id=?", (CORE, THREAD))
+            db.commit()
+            self.assertEqual(db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(), (0, 0, 0))
+            for suffix in ("", "-wal", "-shm"):
+                shutil.copyfile(source.with_name(source.name + suffix),
+                                self.state.with_name(self.state.name + suffix))
+
+        wal = self.state.with_name(self.state.name + "-wal")
+        self.assertEqual(wal.stat().st_size, 0)
+        before = {path.name: path.read_bytes() for path in self.home.iterdir()}
+        findings = {finding.code: finding.count for finding in inspect(self.home).findings}
+        self.assertIn(Code.DB_WAL_DIAGNOSTIC, findings)
+        self.assertNotIn(Code.DB_SIDECARS, findings)
+        self.assertEqual(findings[Code.DESKTOP_PROJECTS], 1)
+        thread = inspect_thread(self.home, self.home, THREAD)
+        self.assertEqual(thread.project_links.database, ProjectLink.LINKED)
+        with self.assertRaises(SnapshotHasSidecars), open_snapshot(self.state, allow_wal=True):
+            self.fail("A repair snapshot must reject the empty WAL.")
+        with self.assertRaisesRegex(RepairError, "desktop_ineligible"):
+            self.plan()
+        self.assertEqual({path.name: path.read_bytes() for path in self.home.iterdir()}, before)
+
+        wal.write_bytes(b"\x37")
+        self.assertIn(Code.DB_SIDECARS, {finding.code for finding in inspect(self.home).findings})
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows file-sharing guards")
     def test_goal_reads_committed_wal_without_using_or_changing_the_disk_index(self):
         source = self.base / "source.sqlite"
         goal = self.home / "goals_1.sqlite"
@@ -711,6 +776,7 @@ class DesktopDiagnostics(DesktopFixture):
     def test_recent_history_repairs_only_cache_with_guarded_wal(self):
         history = self.historical()
         version = repair.RECENT_HISTORY_BUILD
+        self.installed_desktop_version.return_value = version
         with self.assertRaisesRegex(RepairError, "desktop_ineligible"):
             repair.prepare(self.home, self.home, version, history)
         with self.assertRaisesRegex(RepairError, "desktop_version"):
@@ -731,8 +797,10 @@ class DesktopDiagnostics(DesktopFixture):
                 shutil.copyfile(source.with_name(source.name + suffix), target)
         hashes = {path: path.read_bytes() for path in sqlite_files}
         original = self.cache.read_bytes()
+        self.installed_desktop_version.return_value = repair.HISTORY_BUILD
         with self.assertRaisesRegex(RepairError, "desktop_ineligible"):
             repair.prepare(self.home, self.home, repair.HISTORY_BUILD, history)
+        self.installed_desktop_version.return_value = version
         plan = repair.prepare(self.home, self.home, version, history)
         self.assertTrue(plan.uses_wal)
         self.assertEqual((plan.count, plan.linked, plan.skipped), (1, 1, 1))
@@ -1600,6 +1668,419 @@ class DesktopWrites(DesktopFixture):
 
 
 @unittest.skipUnless(os.name == "nt", "Process snapshots use Windows APIs")
+class ExpandedDesktopWrites(DesktopFixture):
+    def setUp(self):
+        super().setUp()
+        # Exercise the pending rules against synthetic profiles without
+        # exposing a way to enable them in a distributed application.
+        registry = (*repair.REGISTRY_BUILDS, repair.PARTIAL_REGISTRY_BUILD)
+        history = (*repair.HISTORY_BUILDS, repair.OBJECT_LINK_BUILD)
+        builds = patch.multiple(repair, REGISTRY_BUILDS=registry, HISTORY_BUILDS=history)
+        builds.start()
+        self.addCleanup(builds.stop)
+        guard = patch.object(repair, "ensure_closed")
+        self.closed = guard.start()
+        self.addCleanup(guard.stop)
+
+    def add_project(self):
+        second = self.base / "second-project"
+        second.mkdir()
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("INSERT INTO projects VALUES (?, 'Second', 1, 30, 40)", (FILE_ONLY,))
+            db.execute("INSERT INTO project_roots VALUES (?, 0, ?)", (FILE_ONLY, str(second)))
+            db.execute("INSERT INTO project_idempotency_keys VALUES ('second', ?)", (FILE_ONLY,))
+            db.commit()
+        return second
+
+    def partial_cache(self):
+        self.add_project()
+        data = json.loads(self.original)
+        data["local-projects"] = {
+            "legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)],
+                       "createdAt": 10, "updatedAt": 20, "extra": "keep"}
+        }
+        data["project-order"] = ["remote", "legacy"]
+        data["projectless-thread-ids"] = [THREAD]
+        self.cache.write_text(json.dumps(data), encoding="utf-8")
+        return data
+
+    def object_history(self):
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            db.execute("ALTER TABLE threads ADD COLUMN thread_source TEXT")
+            db.execute("UPDATE threads SET project_id=?, thread_source='user' WHERE id=?", (CORE, THREAD))
+            db.executemany(
+                "INSERT INTO threads (id, project_id, cwd, rollout_path, archived, thread_source) "
+                "VALUES (?, ?, '', '', ?, ?)",
+                [(ORPHAN, None, 0, "user"), (INDEX_ONLY, CORE, 0, "subagent"),
+                 (FILE_ONLY, CORE, 1, "user"), (CORE, CORE, 0, "user")],
+            )
+            db.commit()
+        current = json.loads(self.original)
+        current["projectless-thread-ids"] = [CORE]
+        current["app-server-project-id-by-legacy-project-id-by-host"] = {"remote": {"keep": "unchanged"}}
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        prior = {key: {"projectKind": "local", "projectId": "legacy"}
+                 for key in (THREAD, ORPHAN, INDEX_ONLY, FILE_ONLY, CORE)}
+        return self.historical({"thread-project-assignments": prior})
+
+    def test_partial_registry_preserves_original_ids_order_and_existing_metadata(self):
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        data = self.partial_cache()
+        original = self.cache.read_bytes()
+        database = self.state.read_bytes()
+        self.assertIn(Code.DESKTOP_CACHE_INCOMPLETE, {finding.code for finding in inspect(self.home).findings})
+        plan = repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+        self.assertEqual((plan.count, plan.linked, plan.skipped), (1, 0, 0))
+        self.assertEqual(self.cache.read_bytes(), original)
+        with self.assertRaisesRegex(RepairError, "^approval_required$"):
+            repair.apply(plan, self.store, approved=False)
+        self.assertFalse(self.store.exists())
+        backup_id = repair.apply(plan, self.store, approved=True)
+        data["local-projects"]["second"] = {
+            "id": "second", "name": "Second", "rootPaths": [str(self.base / "second-project")],
+            "createdAt": 30, "updatedAt": 40,
+        }
+        data["project-order"].append("second")
+        self.assertEqual(json.loads(self.cache.read_bytes()), data)
+        self.assertEqual(self.state.read_bytes(), database)
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+        repair.restore(repair.prepare_restore(self.home, self.store, backup_id), self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+
+    def test_partial_registry_refuses_conflicting_cache_or_duplicate_roots(self):
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        data = self.partial_cache()
+        for changes in (
+            {"thread-project-assignments": {THREAD: "legacy"}},
+            {"project-order": ["legacy", "legacy"]},
+            {"app-server-project-id-by-legacy-project-id-by-host": {"local": {"legacy": FILE_ONLY}}},
+            {"app-server-projects-migration-by-host": {"local:synthetic": {}}},
+        ):
+            with self.subTest(changes=changes):
+                self.cache.write_text(json.dumps(data | changes), encoding="utf-8")
+                before = self.cache.read_bytes()
+                with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                    repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+                self.assertEqual(self.cache.read_bytes(), before)
+        self.cache.write_text(json.dumps(data), encoding="utf-8")
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("UPDATE project_roots SET path=? WHERE project_id=?", (str(self.root), FILE_ONLY))
+            db.commit()
+        with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+            repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+
+    def test_new_rules_refuse_an_unverified_package_or_split_profile(self):
+        with self.assertRaisesRegex(RepairError, "^desktop_profile_mismatch$"):
+            repair.prepare(self.home, self.base, repair.PARTIAL_REGISTRY_BUILD)
+        self.installed_desktop_version.return_value = repair.SUPPORTED_BUILD
+        with self.assertRaisesRegex(RepairError, "^desktop_version_unverified$"):
+            repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+
+    def test_old_rule_cannot_bypass_missing_or_wrong_msix(self):
+        plan = self.plan()
+        for version in (None, repair.PARTIAL_REGISTRY_BUILD):
+            with self.subTest(installed=version):
+                self.installed_desktop_version.return_value = version
+                with self.assertRaisesRegex(RepairError, "^desktop_version_unverified$"):
+                    self.plan()
+                with self.assertRaisesRegex(RepairError, "^desktop_version_unverified$"):
+                    repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+        self.assertFalse(self.store.exists())
+
+    def test_new_rule_refuses_changed_codex_home_override(self):
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        plan = repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.base / "different")}):
+            with self.assertRaisesRegex(RepairError, "^desktop_profile_mismatch$"):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+        self.assertFalse(self.store.exists())
+
+    def test_directory_replaced_at_same_path_invalidates_preview_and_new_backup(self):
+        plan = self.plan()
+        key = repair.apply(plan, self.store, approved=True)
+        rollback = repair.prepare_restore(self.home, self.store, key)
+        repaired = self.cache.read_bytes()
+        retired = self.base / "retired-profile"
+        self.home.rename(retired)
+        shutil.copytree(retired, self.home)
+        self.assertEqual(repair.list_backups(self.store, home=self.home), [])
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.prepare_restore(self.home, self.store, key)
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.restore(rollback, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), repaired)
+        self.cache.write_bytes(self.original)
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+
+    def test_path_bound_legacy_backup_can_still_be_restored(self):
+        plan = self.plan()
+        key = repair.apply(plan, self.store, approved=True)
+        folder = self.store / "desktop"
+        header, original = repair._read_backup(folder, key)
+        header.update(format=1, profile=repair._profile_key(self.home))
+        (folder / (key + ".arkd")).write_bytes(json.dumps(header).encode("ascii") + b"\n" + original)
+        self.assertEqual(repair.list_backups(self.store, home=self.home), [key])
+        rollback = repair.prepare_restore(self.home, self.store, key)
+        repair.restore(rollback, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+
+    def test_partial_repair_refuses_new_sqlite_journal_after_backup(self):
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        plan = repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+        original = self.state.read_bytes()
+        create_backup = repair._backup
+        journal = self.state.with_name(self.state.name + "-wal")
+
+        def backup_then_journal(*args):
+            key = create_backup(*args)
+            journal.write_bytes(b"synthetic late journal")
+            return key
+
+        with patch.object(repair, "_backup", side_effect=backup_then_journal):
+            with self.assertRaisesRegex(RepairError, "^stale$"):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), self.original)
+        self.assertEqual(self.state.read_bytes(), original)
+        self.assertEqual(journal.read_bytes(), b"synthetic late journal")
+        self.assertEqual(len(repair.list_backups(self.store, home=self.home)), 1)
+
+    def test_two_spellings_of_one_root_are_refused(self):
+        from ai_repair_kit.tools import desktop_registry
+
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        self.partial_cache()
+        with patch.object(desktop_registry, "ordinary_path", return_value=self.root.stat()):
+            with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+
+    def test_object_link_repair_refuses_a_snapshot_with_another_profile_scope(self):
+        self.installed_desktop_version.return_value = repair.OBJECT_LINK_BUILD
+        path = self.object_history()
+        snapshot = json.loads(path.read_bytes())
+        snapshot["app-server-projects-migration-by-host"] = {"local:foreign": {}}
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+        with self.assertRaisesRegex(RepairError, "^desktop_snapshot_conflict$"):
+            repair.prepare(self.home, self.home, repair.OBJECT_LINK_BUILD, path)
+        self.assertFalse(self.store.exists())
+
+    def test_msix_change_after_backup_leaves_both_original_and_backup(self):
+        self.installed_desktop_version.side_effect = [
+            repair.PARTIAL_REGISTRY_BUILD, repair.PARTIAL_REGISTRY_BUILD, "26.1103.3517.0",
+        ]
+        before = self.cache.read_bytes()
+        plan = repair.prepare(self.home, self.home, repair.PARTIAL_REGISTRY_BUILD)
+        with self.assertRaisesRegex(RepairError, "^desktop_version_unverified$"):
+            repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.assertEqual(len(repair.list_backups(self.store, home=self.home)), 1)
+
+    def test_object_links_require_two_sources_and_keep_other_stores(self):
+        self.installed_desktop_version.return_value = repair.OBJECT_LINK_BUILD
+        history = self.object_history()
+        before = self.cache.read_bytes()
+        database = self.state.read_bytes()
+        source = history.read_bytes()
+        goal = self.home / "goals_1.sqlite"
+        goal.write_bytes(b"synthetic goal store not opened by cache repair")
+        session = self.home / "sessions"
+        session.mkdir()
+        rollout = session / "synthetic.jsonl"
+        rollout.write_bytes(b"synthetic rollout not opened by cache repair")
+        plan = repair.prepare(self.home, self.home, repair.OBJECT_LINK_BUILD, history)
+        self.assertEqual((plan.count, plan.linked, plan.skipped), (1, 1, 4))
+        self.assertEqual(self.cache.read_bytes(), before)
+        backup_id = repair.apply(plan, self.store, approved=True)
+        expected = json.loads(before)
+        expected["local-projects"] = {
+            "legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)],
+                       "createdAt": 10, "updatedAt": 20},
+        }
+        expected["project-order"] = ["legacy"]
+        expected["app-server-project-id-by-legacy-project-id-by-host"]["local"] = {"legacy": CORE}
+        expected["thread-project-assignments"] = {THREAD: {"projectKind": "local", "projectId": "legacy"}}
+        self.assertEqual(json.loads(self.cache.read_bytes()), expected)
+        self.assertEqual(inspect_thread(self.home, self.home, THREAD).project_links.comparison,
+                         ProjectComparison.AGREE)
+        repair.restore(repair.prepare_restore(self.home, self.store, backup_id), self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.assertEqual(self.state.read_bytes(), database)
+        self.assertEqual(history.read_bytes(), source)
+        self.assertEqual(goal.read_bytes(), b"synthetic goal store not opened by cache repair")
+        self.assertEqual(rollout.read_bytes(), b"synthetic rollout not opened by cache repair")
+
+    def test_object_links_refuse_conflicting_snapshot_and_missing_proof(self):
+        self.installed_desktop_version.return_value = repair.OBJECT_LINK_BUILD
+        history = self.object_history()
+        old = json.loads(history.read_bytes())
+        old["app-server-project-id-by-legacy-project-id-by-host"]["local"]["legacy"] = ORPHAN
+        history.write_text(json.dumps(old), encoding="utf-8")
+        with self.assertRaisesRegex(RepairError, "^desktop_snapshot_conflict$"):
+            repair.prepare(self.home, self.home, repair.OBJECT_LINK_BUILD, history)
+        old["app-server-project-id-by-legacy-project-id-by-host"]["local"]["legacy"] = CORE
+        old["thread-project-assignments"][THREAD] = {"projectKind": "cloud", "projectId": "legacy"}
+        history.write_text(json.dumps(old), encoding="utf-8")
+        with self.assertRaisesRegex(RepairError, "^desktop_snapshot_no_links$"):
+            repair.prepare(self.home, self.home, repair.OBJECT_LINK_BUILD, history)
+
+    def test_object_link_repair_rolls_back_after_replacement_failure(self):
+        self.installed_desktop_version.return_value = repair.OBJECT_LINK_BUILD
+        history = self.object_history()
+        original = self.cache.read_bytes()
+        plan = repair.prepare(self.home, self.home, repair.OBJECT_LINK_BUILD, history)
+        replace_file = repair._replace
+        first = True
+
+        def fail_after_first_replace(*args):
+            nonlocal first
+            replace_file(*args)
+            if first:
+                first = False
+                raise OSError("synthetic failure")
+
+        with patch.object(repair, "_replace", side_effect=fail_after_first_replace):
+            with self.assertRaisesRegex(RepairError, "^rolled_back$"):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertEqual(len(repair.list_backups(self.store, home=self.home)), 1)
+
+    def test_read_only_diagnosis_separates_cache_conflicts_stale_links_and_profile_override(self):
+        self.object_history()
+        data = json.loads(self.cache.read_bytes())
+        data["app-server-project-id-by-legacy-project-id-by-host"]["local"] = {"legacy": ORPHAN}
+        data["app-server-projects-migration-by-host"] = {"local:private-path": {}}
+        data["thread-project-assignments"] = {
+            THREAD: {"projectKind": "local", "projectId": "legacy"}, ORPHAN: "deleted-project",
+        }
+        self.cache.write_text(json.dumps(data), encoding="utf-8")
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("DELETE FROM project_idempotency_keys")
+            db.commit()
+        original = self.cache.read_bytes()
+        database = self.state.read_bytes()
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.base / "alternate")}):
+            result = {finding.code: finding.count for finding in inspect(self.home).findings}
+        self.assertEqual(result[Code.DESKTOP_CACHE_OBJECT_LINKS], 1)
+        self.assertEqual(result[Code.DESKTOP_CACHE_STALE_LINKS], 2)
+        self.assertEqual(result[Code.DESKTOP_CACHE_LINK_CONFLICTS], 2)
+        self.assertEqual(result[Code.DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE], 2)
+        self.assertEqual(result[Code.DESKTOP_LEGACY_IDENTITY_MISSING], 1)
+        self.assertEqual(result[Code.DESKTOP_PROFILE_QUALIFIED_MIGRATION], 1)
+        self.assertEqual(result[Code.CODEX_HOME_MISMATCH], 1)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertEqual(self.state.read_bytes(), database)
+
+
+    def test_profile_qualified_diagnostics_use_only_matching_home(self):
+        history = self.object_history()
+        prior = json.loads(history.read_bytes())
+        home_key = f"local:{self.home}"
+        foreign_key = f"local:{self.base / 'foreign'}"
+        marker = {"projectsMigrated": True, "threadAssignmentsMigrated": False,
+                  "pendingThreadAssignmentIds": [ORPHAN]}
+        prior["app-server-projects-migration-by-host"] = {
+            home_key: marker,
+            foreign_key: marker | {"pendingThreadAssignmentIds": [str(UUID(int=999))]},
+        }
+        mapping_key = "app-server-project-id-by-legacy-project-id-by-host"
+        prior[mapping_key] = {home_key: {"legacy": CORE}, foreign_key: {"legacy": ORPHAN}}
+        self.cache.write_text(json.dumps(prior), encoding="utf-8")
+        before = self.cache.read_bytes()
+        findings = {x.code: x.count for x in inspect(self.home).findings}
+        self.assertEqual(findings[Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING], 1)
+        self.assertEqual(findings[Code.DESKTOP_PROFILE_QUALIFIED_MIGRATION], 1)
+        self.assertEqual(inspect_thread(self.home, self.home, THREAD).project_links.comparison,
+                         ProjectComparison.AGREE)
+        self.assertEqual(self.cache.read_bytes(), before)
+
+        prior[mapping_key]["local"] = {"legacy": ORPHAN}
+        self.cache.write_text(json.dumps(prior), encoding="utf-8")
+        self.assertEqual(inspect_thread(self.home, self.home, THREAD).project_links.cache,
+                         ProjectLink.INCOMPLETE_MAPPING)
+
+    def test_new_previews_use_selected_rule_in_both_languages_and_themes(self):
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+        from ai_repair_kit.gui import codex_workflow
+        from ai_repair_kit.gui.window import MainWindow
+
+        self.partial_cache()
+        before = self.cache.read_bytes()
+        database = self.state.read_bytes()
+        self.installed_desktop_version.return_value = repair.PARTIAL_REGISTRY_BUILD
+        app = QApplication.instance() or QApplication([])
+        for language, expected in (("en", "Missing project registrations"), ("ko", "누락 프로젝트")):
+            for theme in ("light", "dark"):
+                with self.subTest(language=language, theme=theme):
+                    settings = QSettings(str(self.base / "new-rule-ui.ini"), QSettings.Format.IniFormat)
+                    settings.setValue("language", language)
+                    settings.setValue("theme", theme)
+                    window = MainWindow(app, settings, self.store)
+                    try:
+                        window.show()
+                        window.nav.setCurrentRow(1)
+                        flow = window.workflow
+                        flow.path.setText(str(self.home))
+                        with patch.object(codex_workflow.codex_diagnostics, "installed_desktop_version",
+                                          return_value=repair.PARTIAL_REGISTRY_BUILD):
+                            flow.start_scan()
+                            flow.future.result(timeout=20)
+                            flow.finish_scan()
+                        self.assertIn(repair.PARTIAL_REGISTRY_BUILD, flow.results.text())
+                        self.assertTrue(flow.desktop_repair.isVisible())
+                        with (patch.object(codex_workflow.QInputDialog, "getText",
+                                           return_value=(repair.PARTIAL_REGISTRY_BUILD, True)),
+                              patch.object(flow, "confirm_change", return_value=False) as confirm):
+                            flow.desktop_repair.click()
+                        self.assertIn(expected, confirm.call_args.args[1])
+                        self.assertEqual(self.cache.read_bytes(), before)
+                        self.assertEqual(self.state.read_bytes(), database)
+                        self.assertFalse(self.store.exists())
+                    finally:
+                        app.removeTranslator(window.translations.translator)
+                        window.close()
+
+    def test_object_link_preview_requires_selected_snapshot_and_shows_exact_counts(self):
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+        from ai_repair_kit.gui import codex_workflow
+        from ai_repair_kit.gui.window import MainWindow
+
+        history = self.object_history()
+        before = self.cache.read_bytes()
+        self.installed_desktop_version.return_value = repair.OBJECT_LINK_BUILD
+        app = QApplication.instance() or QApplication([])
+        settings = QSettings(str(self.base / "object-ui.ini"), QSettings.Format.IniFormat)
+        settings.setValue("language", "en")
+        window = MainWindow(app, settings, self.store)
+        try:
+            window.show()
+            window.nav.setCurrentRow(1)
+            flow = window.workflow
+            flow.path.setText(str(self.home))
+            flow.report = replace(inspect(self.home), desktop_version=repair.OBJECT_LINK_BUILD)
+            flow.render()
+            self.assertTrue(flow.desktop_history.isVisible())
+            with (patch.object(codex_workflow.QInputDialog, "getText",
+                               return_value=(repair.OBJECT_LINK_BUILD, True)),
+                  patch.object(codex_workflow.QFileDialog, "getOpenFileName",
+                               return_value=(str(history), "")),
+                  patch.object(flow, "confirm_change", return_value=False) as confirm):
+                flow.desktop_history.click()
+            self.assertIn("confirmed by both the snapshot and SQLite: 1", confirm.call_args.args[1])
+            self.assertIn("Historical links left untouched: 4", confirm.call_args.args[1])
+            self.assertEqual(self.cache.read_bytes(), before)
+            self.assertFalse(self.store.exists())
+        finally:
+            app.removeTranslator(window.translations.translator)
+            window.close()
+
+
 class NativeDesktopGuard(DesktopFixture):
     def test_process_started_after_backup_is_detected_and_cache_is_preserved(self):
         # Use a distinct child process in the synthetic profile. The name filter in

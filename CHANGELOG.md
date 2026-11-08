@@ -1,6 +1,16 @@
 # Changelog
 
-## 1.0.0rc2 · Unreleased
+## 1.0.0rc3 · Prerelease candidate
+
+- Added synthetic lab coverage for missing project registrations on MSIX `26.915.4065.0` and object-shaped cache links on MSIX `26.924.2738.0`. Both versions remain diagnostic-only in the distributed build until Desktop recovery can be verified.
+- Added read-only findings for profile redirects, missing or ambiguous original project IDs, stale or conflicting cache links, and SQLite links missing from the cache.
+- Read guarded zero-byte SQLite WALs left by a checkpoint during diagnosis, including on the `26.1103.4239.0` Windows 11 lab fixture. Existing write restrictions still apply.
+- Included the detected Windows MSIX version and last scan's diagnostic codes in the optional support report.
+- Reviewed all 81 comments in Codex issue #42739 and grouped follow-ups by incident. Added a security and build verification guide in response to the latest comment.
+
+- Required an exact Store x64 MSIX match for every forward Desktop cache repair. Bound previews and new cache backups to the profile directory identity, and rejected late SQLite journals, duplicate root identities and inconsistent snapshot scope.
+
+## 1.0.0rc2 · Published prerelease
 
 - Defaulted fresh installations to English while retaining saved language choices.
 - Added a bounded missing-project-timestamp repair for MSIX `26.903.8094.0` and recognized historical `.tmp-*` snapshots.

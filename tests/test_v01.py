@@ -71,6 +71,11 @@ class WindowTests(unittest.TestCase):
         TEST_WORK.mkdir(exist_ok=True)
 
     def setUp(self) -> None:
+        package_probe = patch(
+            "ai_repair_kit.tools.codex_diagnostics.installed_desktop_version", return_value=None,
+        )
+        package_probe.start()
+        self.addCleanup(package_probe.stop)
         work = TemporaryDirectory(dir=TEST_WORK)
         self.addCleanup(work.cleanup)
         self.settings = QSettings(str(Path(work.name) / "preferences.ini"), QSettings.Format.IniFormat)

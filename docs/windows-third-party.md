@@ -8,9 +8,12 @@ QT-SOURCES.sha256 identifies the official Qt 6.11.3 source archives by file name
 
 The CPython license file includes the Python Software Foundation terms, bundled third-party notices and conditions for the Windows build. PyInstaller's COPYING includes its bootloader exception. For the application and these components, use the version-matched source and build scripts identified with the candidate.
 
+The ZIP ships the official SQLite 3.54.1 x64 DLL in place of the Python installer's SQLite library. SQLite is public domain. The release also provides the pinned `sqlite-amalgamation-3540100.zip` source archive.
+
 - [Qt for Python licenses](https://doc.qt.io/qtforpython-6/licenses.html)
 - [Qt LGPL obligations](https://www.qt.io/development/open-source-lgpl-obligations)
 - [PySide6 Windows build instructions](https://doc.qt.io/qtforpython-6/building_from_source/windows.html)
 - [CPython 3.11.9 source](https://www.python.org/downloads/release/python-3119/)
 - [PyInstaller 6.22.3 source](https://github.com/pyinstaller/pyinstaller/tree/v6.22.3)
+- [SQLite 3.54.1 release](https://sqlite.org/releaselog/3_54_1.html) and [public-domain terms](https://sqlite.org/copyright.html)
 - [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)

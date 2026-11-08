@@ -42,9 +42,28 @@ jobs:
           .\.venv\Scripts\python.exe scripts/prepare_windows_notices.py build/windows-notices
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\scripts\package_windows.ps1 -OutputDirectory candidate -NoticesDirectory build/windows-notices
+          $sqliteSource = 'sqlite-amalgamation-3540100.zip'
+          Copy-Item -LiteralPath (Join-Path 'build\sqlite-runtime' $sqliteSource) -Destination candidate
+          $sqliteHash = (Get-FileHash -LiteralPath (Join-Path candidate $sqliteSource)).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath candidate\SHA256SUMS.txt -Value "$sqliteHash  $sqliteSource" -Encoding ascii
           $revision = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $revision -ne $env:GITHUB_SHA) { throw "Unexpected source revision" }
           Set-Content -LiteralPath candidate\SOURCE-REVISION.txt -Value $revision -Encoding ascii
+      - name: Test source with the bundled SQLite DLL
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          @'
+          import ctypes
+          from pathlib import Path
+          ctypes.WinDLL(str(Path("dist/AI-Repair-Kit/_internal/sqlite3.dll").resolve()))
+          import sqlite3
+          import unittest
+          if sqlite3.sqlite_version != "3.54.1":
+              raise RuntimeError("The test process did not load the bundled SQLite runtime.")
+          unittest.main(module=None, argv=["unittest", "discover", "-s", "tests", "-v"])
+          '@ | .\.venv\Scripts\python.exe -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-x64-candidate-${{ github.sha }}

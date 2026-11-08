@@ -33,6 +33,7 @@ class CodexWorkflow(QObject):
         self.refresh, self.restore = refresh, restore
         self.locations: codex.Locations | None = None
         self.report: Report | None = None
+        self.last_scan: Report | None = None
         self.message = ""
         self.backup_count: int | None = None
         self.backup_error = False
@@ -114,6 +115,7 @@ class CodexWorkflow(QObject):
         self.thread_report = None
         self.invalid_thread = False
         self.report = None
+        self.last_scan = None
         self.message = ""
         self.show_backup_outcome = False
         self.backup_count = None
@@ -128,11 +130,14 @@ class CodexWorkflow(QObject):
         locations = self.locations
         override = locations.sqlite_override if locations and locations.home == home else None
         self.report = None
+        self.last_scan = None
         self.thread_report = None
         self.invalid_thread = False
         self.message = "waiting"
         self.show_backup_outcome = False
-        self.future = self.executor.submit(codex_diagnostics.inspect, home, override)
+        self.future = self.executor.submit(
+            codex_diagnostics.inspect, home, override, check_desktop_version=True,
+        )
         self.timer.start()
         self.render()
 
@@ -163,7 +168,7 @@ class CodexWorkflow(QObject):
             if isinstance(result, ThreadReport):
                 self.thread_report = result
             else:
-                self.report = result
+                self.report = self.last_scan = result
             self.message = ""
         except ThreadLocationChanged:
             self.report = None
@@ -235,6 +240,9 @@ class CodexWorkflow(QObject):
                 )
                 if not entered:
                     return
+                version = version.strip()
+                if self.report.desktop_version and self.report.desktop_version != version:
+                    raise codex_repair.RepairError("desktop_version_unverified")
                 history = None
                 if historical:
                     patterns = " ".join(desktop_repair.HISTORY_FILENAMES)
@@ -247,10 +255,14 @@ class CodexWorkflow(QObject):
                         return
                     history = Path(path)
                 plan = desktop_repair.prepare(
-                    home, self.report.db_home, version.strip(), history,
+                    home, self.report.db_home, version, history,
                     sqlite_override=self.report.sqlite_override,
                 )
-                if plan.build == desktop_repair.TIMESTAMP_BUILD:
+                if plan.build == desktop_repair.PARTIAL_REGISTRY_BUILD:
+                    preview = self.tr("Target: %1\nMissing project registrations to restore: %2\nExisting project entries and order will be preserved. The full cache will be backed up and verified first. Check the project list after restarting Codex. This rule has been tested with synthetic profiles.")
+                elif plan.build == desktop_repair.OBJECT_LINK_BUILD:
+                    preview = self.tr("Target: %1\nProject registrations to restore: %2\nChat links confirmed by both the snapshot and SQLite: %3\nHistorical links left untouched: %4\nThe full cache will be backed up and verified first. Check the projects and an old chat after restarting Codex. This rule has been tested with synthetic profiles.")
+                elif plan.build == desktop_repair.TIMESTAMP_BUILD:
                     preview = self.tr("Target: %1\nProjects with missing timestamps to update: %2\nOnly missing createdAt and updatedAt fields will be filled from matching SQLite records. Chat links and existing fields will be preserved. The full cache will be backed up and verified first. Check Codex after restart.")
                 else:
                     preview = self.tr("Target: %1\nProjects to add: %2\nHistorical chat links to add: %3\nHistorical links left untouched: %4\nOnly the Desktop cache will change. The full cache will be backed up and verified first. Check Codex after restart.")
@@ -316,7 +328,9 @@ class CodexWorkflow(QObject):
     def review_support_report(self) -> None:
         if self.future is not None or not (self.report or self.message in support_report.OUTCOMES):
             return
-        report = support_report.format_report(self.report, self.thread_report, self.message)
+        report = support_report.format_report(
+            self.report or self.last_scan, self.thread_report if self.report else None, self.message,
+        )
         dialog = QDialog(self.window)
         dialog.setWindowTitle(self.tr("Review support report"))
         dialog.resize(520, 370)
@@ -351,7 +365,7 @@ class CodexWorkflow(QObject):
         codes = {item.code for item in self.report.findings} if self.report else set()
         can_preview = Code.DB_WAL_DIAGNOSTIC not in codes
         self.desktop_repair.setVisible(can_preview and bool(codes & {
-            Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING,
+            Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_CACHE_INCOMPLETE, Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING,
         }))
         pending_empty_cache = {Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING} <= codes
         self.desktop_history.setVisible(Code.DESKTOP_PROJECTS in codes and (can_preview or pending_empty_cache))
@@ -393,6 +407,9 @@ class CodexWorkflow(QObject):
         if self.report and not self.message:
             result = "\n".join(self.finding_text(item) for item in self.report.findings)
             result = result or self.tr("No issues found in the checks that ran.")
+            if self.report.desktop_version:
+                version = self.tr("Installed Codex Desktop MSIX: %1").replace("%1", self.report.desktop_version)
+                result = version + "\n" + result
         self.results.setText(result)
         self.results.setVisible(bool(result))
 
@@ -505,6 +522,10 @@ class CodexWorkflow(QObject):
             "desktop_repaired": self.tr("Desktop cache written and verified. Restart Codex and confirm the project list and an old chat in the app."),
             "desktop_restored": self.tr("Original Desktop cache restored and verified."),
             "desktop_version": self.tr("This Desktop version is not supported by the selected recovery rule."),
+            "desktop_version_unverified": self.tr("The registered x64 Codex MSIX could not be verified as the selected version. Check the installed package and run diagnostics again."),
+            "desktop_profile_mismatch": self.tr("The SQLite database and Desktop cache resolve to different folders. Confirm the original profile before trying this repair."),
+            "desktop_snapshot_conflict": self.tr("The selected snapshot disagrees with the current project IDs, names, roots, or local mapping. Keep both copies for review."),
+            "desktop_snapshot_no_links": self.tr("The selected snapshot and SQLite contain no matching eligible chat links. Keep the snapshot and inspect an original chat link if you have one."),
             "desktop_snapshot_name": self.tr("Choose a pre-incident .codex-global-state.json, .bak, or .tmp-* snapshot."),
             "desktop_ineligible": self.tr("The cache, schema or project evidence does not qualify for this rule. Keep your files and consult the user guide."),
             "desktop_busy": self.tr("Codex or ChatGPT may be running, or another repair holds the profile lock. Fully exit the apps and try again."),
@@ -549,6 +570,16 @@ class CodexWorkflow(QObject):
             Code.DESKTOP_CACHE_EMPTY: self.tr("The Desktop project cache is empty although SQLite still has projects."),
             Code.DESKTOP_CACHE_UNAVAILABLE: self.tr("The Desktop cache is missing, invalid or unreadable. Preserve any prior snapshot and consult the user guide."),
             Code.DESKTOP_CACHE_INCOMPLETE: self.tr("SQLite projects absent from the Desktop cache: %1. A historical snapshot may help."),
+            Code.CODEX_HOME_OVERRIDE: self.tr("The selected folder is set by CODEX_HOME in this process. Check which folder Codex Desktop actually opened."),
+            Code.CODEX_HOME_MISMATCH: self.tr("This process sets CODEX_HOME to a different folder. Confirm the original Codex profile before repairing either folder."),
+            Code.DB_HOME_REDIRECTED: self.tr("The state database resolves to a different folder from the selected Codex profile. Verify that both belong to the intended profile."),
+            Code.DESKTOP_PROFILE_QUALIFIED_MIGRATION: self.tr("The cache uses a profile-qualified migration key. Confirm the active profile and preserve this cache for review."),
+            Code.DESKTOP_LEGACY_IDENTITY_MISSING: self.tr("SQLite projects without a recorded original Desktop ID: %1. A verified earlier snapshot or mapping is needed."),
+            Code.DESKTOP_LEGACY_IDENTITY_AMBIGUOUS: self.tr("SQLite projects with multiple possible original Desktop IDs: %1. Preserve the mappings for review."),
+            Code.DESKTOP_CACHE_OBJECT_LINKS: self.tr("Recognized local cache chat links stored as objects: %1."),
+            Code.DESKTOP_CACHE_STALE_LINKS: self.tr("Local cache chat links whose project entry or thread is missing: %1. Preserve the original cache and database."),
+            Code.DESKTOP_CACHE_LINK_CONFLICTS: self.tr("Chat links conflicting with SQLite or an explicit projectless choice: %1. Review the original evidence before relinking."),
+            Code.DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE: self.tr("SQLite chat links with no cache assignment: %1. This identifies a metadata mismatch. Check whether the original chat opens under its project in Codex."),
             Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING: self.tr("Project cache entries missing timestamp fields: %1. A version-specific repair may apply."),
             Code.DESKTOP_ROOT_SHARED: self.tr("Exact project roots shared by multiple SQLite project records: %1. Review the original registrations before re-adding folders."),
             Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING: self.tr("The Desktop cache marks project migration complete and chat assignment migration incomplete. Preserve the cache for review."),

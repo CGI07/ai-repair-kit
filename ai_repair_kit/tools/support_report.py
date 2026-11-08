@@ -1,6 +1,7 @@
 """Create a shareable summary from existing diagnostic results."""
 
 import json
+import re
 
 from .. import __version__
 from .codex_diagnostics import Report
@@ -10,16 +11,19 @@ OUTCOMES = frozenset({
     "backup_invalid", "desktop_busy", "desktop_ineligible", "desktop_repaired",
     "desktop_restored", "desktop_snapshot_name", "desktop_version", "io_error",
     "repaired", "restored", "rollback_failed", "rolled_back", "scan_error", "stale",
-    "thread_location_changed",
+    "thread_location_changed", "desktop_profile_mismatch", "desktop_version_unverified",
+    "desktop_snapshot_conflict", "desktop_snapshot_no_links",
 })
 
 
 def format_report(
     scan: Report | None, thread: ThreadReport | None, outcome: str,
 ) -> str:
-    """Export only fixed codes, counts, and the app version."""
+    """Export fixed codes, counts, and bounded version numbers."""
     data: dict[str, object] = {"format": 1, "ai_repair_kit": __version__}
     if scan is not None:
+        if scan.desktop_version and re.fullmatch(r"[0-9]{1,5}(?:\.[0-9]{1,5}){3}", scan.desktop_version):
+            data["codex_desktop_msix"] = scan.desktop_version
         data["last_scan"] = {finding.code.value: finding.count for finding in scan.findings}
         if thread is not None:
             data["thread_check"] = {

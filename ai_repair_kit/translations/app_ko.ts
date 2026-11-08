@@ -810,5 +810,85 @@ Only missing createdAt and updatedAt fields will be filled from matching SQLite 
             <source>Close report</source>
             <translation>보고서 닫기</translation>
         </message>
+        <message>
+            <source>Installed Codex Desktop MSIX: %1</source>
+            <translation>설치된 Codex Desktop MSIX: %1</translation>
+        </message>
+        <message>
+            <source>Target: %1
+Missing project registrations to restore: %2
+Existing project entries and order will be preserved. The full cache will be backed up and verified first. Check the project list after restarting Codex. This rule has been tested with synthetic profiles.</source>
+            <translation>대상: %1
+복원할 누락 프로젝트 등록: %2
+기존 프로젝트 항목과 순서를 유지합니다. 먼저 전체 캐시를 백업하고 검증합니다. Codex를 다시 시작한 뒤 프로젝트 목록을 확인하세요. 이 규칙은 합성 프로필에서 테스트했습니다.</translation>
+        </message>
+        <message>
+            <source>Target: %1
+Project registrations to restore: %2
+Chat links confirmed by both the snapshot and SQLite: %3
+Historical links left untouched: %4
+The full cache will be backed up and verified first. Check the projects and an old chat after restarting Codex. This rule has been tested with synthetic profiles.</source>
+            <translation>대상: %1
+복원할 프로젝트 등록: %2
+스냅샷과 SQLite 양쪽에서 확인한 채팅 연결: %3
+그대로 둔 과거 채팅 연결: %4
+먼저 전체 캐시를 백업하고 검증합니다. Codex를 다시 시작한 뒤 프로젝트 목록과 이전 채팅을 확인하세요. 이 규칙은 합성 프로필에서 테스트했습니다.</translation>
+        </message>
+        <message>
+            <source>The registered x64 Codex MSIX could not be verified as the selected version. Check the installed package and run diagnostics again.</source>
+            <translation>등록된 x64 Codex MSIX가 선택한 버전인지 확인할 수 없습니다. 설치된 패키지를 확인한 뒤 다시 진단하세요.</translation>
+        </message>
+        <message>
+            <source>The SQLite database and Desktop cache resolve to different folders. Confirm the original profile before trying this repair.</source>
+            <translation>SQLite 데이터베이스와 Desktop 캐시의 폴더가 서로 다릅니다. 이 복구를 시도하기 전에 원래 프로필을 확인하세요.</translation>
+        </message>
+        <message>
+            <source>The selected snapshot disagrees with the current project IDs, names, roots, or local mapping. Keep both copies for review.</source>
+            <translation>선택한 스냅샷이 현재 프로젝트 ID, 이름, 루트 또는 로컬 매핑과 일치하지 않습니다. 검토할 수 있도록 두 사본을 모두 보관하세요.</translation>
+        </message>
+        <message>
+            <source>The selected snapshot and SQLite contain no matching eligible chat links. Keep the snapshot and inspect an original chat link if you have one.</source>
+            <translation>선택한 스냅샷과 SQLite 양쪽에서 확인할 수 있는 복구 대상 채팅 연결이 없습니다. 스냅샷을 보관하고, 원래 채팅 링크가 있다면 해당 채팅을 검사하세요.</translation>
+        </message>
+        <message>
+            <source>The selected folder is set by CODEX_HOME in this process. Check which folder Codex Desktop actually opened.</source>
+            <translation>선택한 폴더는 이 프로세스의 CODEX_HOME으로 지정되었습니다. Codex Desktop이 실제로 연 폴더를 확인하세요.</translation>
+        </message>
+        <message>
+            <source>This process sets CODEX_HOME to a different folder. Confirm the original Codex profile before repairing either folder.</source>
+            <translation>이 프로세스의 CODEX_HOME은 다른 폴더를 가리킵니다. 복구하기 전에 Codex의 원래 프로필을 확인하세요.</translation>
+        </message>
+        <message>
+            <source>The state database resolves to a different folder from the selected Codex profile. Verify that both belong to the intended profile.</source>
+            <translation>상태 데이터베이스가 선택한 Codex 프로필과 다른 폴더에 있습니다. 두 위치가 같은 프로필에 속하는지 확인하세요.</translation>
+        </message>
+        <message>
+            <source>The cache uses a profile-qualified migration key. Confirm the active profile and preserve this cache for review.</source>
+            <translation>캐시의 마이그레이션 키가 프로필에 따라 구분됩니다. 활성 프로필을 확인하고 검토용으로 캐시를 보관하세요.</translation>
+        </message>
+        <message>
+            <source>SQLite projects without a recorded original Desktop ID: %1. A verified earlier snapshot or mapping is needed.</source>
+            <translation>원래 Desktop ID가 기록되지 않은 SQLite 프로젝트: %1개. 검증된 이전 스냅샷이나 매핑이 필요합니다.</translation>
+        </message>
+        <message>
+            <source>SQLite projects with multiple possible original Desktop IDs: %1. Preserve the mappings for review.</source>
+            <translation>원래 Desktop ID 후보가 여러 개인 SQLite 프로젝트: %1개. 검토할 수 있도록 매핑을 보관하세요.</translation>
+        </message>
+        <message>
+            <source>Recognized local cache chat links stored as objects: %1.</source>
+            <translation>객체 형식으로 저장된 로컬 캐시 채팅 연결: %1개.</translation>
+        </message>
+        <message>
+            <source>Local cache chat links whose project entry or thread is missing: %1. Preserve the original cache and database.</source>
+            <translation>프로젝트 항목이나 스레드가 없는 로컬 캐시 채팅 연결: %1개. 원래 캐시와 데이터베이스를 보관하세요.</translation>
+        </message>
+        <message>
+            <source>Chat links conflicting with SQLite or an explicit projectless choice: %1. Review the original evidence before relinking.</source>
+            <translation>SQLite 또는 명시적인 프로젝트 미지정 상태와 충돌하는 채팅 연결: %1개. 다시 연결하기 전에 원래 근거를 확인하세요.</translation>
+        </message>
+        <message>
+            <source>SQLite chat links with no cache assignment: %1. This identifies a metadata mismatch. Check whether the original chat opens under its project in Codex.</source>
+            <translation>캐시에 대응하는 항목이 없는 SQLite 채팅 연결: %1개. 메타데이터 불일치입니다. Codex에서 원래 채팅이 해당 프로젝트 아래에서 열리는지 확인하세요.</translation>
+        </message>
     </context>
 </TS>

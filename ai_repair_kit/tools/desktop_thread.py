@@ -9,8 +9,9 @@ from pathlib import Path
 from ..local_files import ordinary_path
 from .codex_diagnostics import Report, inspect_config_bytes, locked_config
 from .desktop_catalog import (
-    GOAL_NAME, STATE_NAME, SnapshotHasSidecars, canonical_id, check_rollout_file, columns, local_rollout_path,
-    open_snapshot, read_cache, rollout_identity, session_files,
+    GOAL_NAME, STATE_NAME, SnapshotHasSidecars, canonical_id, check_rollout_file, columns,
+    local_assignment_key, local_host_record, local_rollout_path, open_snapshot, read_cache,
+    rollout_identity, session_files,
 )
 from .desktop_history import ASSIGNMENTS, HOST_MAP, PROJECTLESS, REGISTRY, _object, _string_list
 
@@ -136,7 +137,9 @@ def inspect_thread(home: Path, db_home: Path, key: str) -> ThreadReport:
     # Keep the state snapshot stable while opening the separate Goal store.
     with ExitStack() as snapshots:
         try:
-            state = snapshots.enter_context(open_snapshot(db_home / STATE_NAME, allow_wal=True)).connection
+            state = snapshots.enter_context(
+                open_snapshot(db_home / STATE_NAME, allow_wal=True, allow_empty_wal=True)
+            ).connection
             thread = _row(state, "threads", "id", key)
             if thread is Presence.FOUND:
                 archived = _archive_flag(state, key)
@@ -153,7 +156,9 @@ def inspect_thread(home: Path, db_home: Path, key: str) -> ThreadReport:
         cache_link, cache_id = _cache_project(home, key)
 
         try:
-            goals = snapshots.enter_context(open_snapshot(db_home / GOAL_NAME, allow_wal=True)).connection
+            goals = snapshots.enter_context(
+                open_snapshot(db_home / GOAL_NAME, allow_wal=True, allow_empty_wal=True)
+            ).connection
             separate, separate_record = _goal_record(goals, key)
         except FileNotFoundError:
             separate = Presence.STORE_MISSING
@@ -224,11 +229,13 @@ def _cache_project(home: Path, key: str) -> tuple[ProjectLink, str | None]:
             return status, None
         if assignment is None:
             return ProjectLink.UNASSIGNED, None
-        if not isinstance(assignment, str) or not assignment:
+        project_key = local_assignment_key(assignment)
+        if project_key is None:
             return ProjectLink.UNAVAILABLE, None
-        entry = _object(cache, REGISTRY).get(assignment)
-        project = _object(_object(cache, HOST_MAP), "local").get(assignment)
-        if not isinstance(entry, dict) or entry.get("id") != assignment or not canonical_id(project):
+        entry = _object(cache, REGISTRY).get(project_key)
+        mapping = local_host_record(cache.get(HOST_MAP), home)
+        project = mapping.get(project_key) if mapping is not None else None
+        if not isinstance(entry, dict) or entry.get("id") != project_key or not canonical_id(project):
             return ProjectLink.INCOMPLETE_MAPPING, None
         return ProjectLink.LINKED, project
     except (OSError, ValueError):

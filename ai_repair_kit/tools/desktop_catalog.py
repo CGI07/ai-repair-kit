@@ -72,6 +72,14 @@ def decode_cache(data: bytes) -> dict:
     return result
 
 
+def local_assignment_key(value: object) -> str | None:
+    if isinstance(value, dict):
+        if value.keys() != {"projectKind", "projectId"} or value["projectKind"] != "local":
+            return None
+        value = value["projectId"]
+    return value if isinstance(value, str) and 0 < len(value) <= 256 else None
+
+
 def read_cache(home: Path) -> tuple[bytes, dict]:
     with stable_file(home / CACHE_NAME) as stream:
         data = stream.read(CACHE_LIMIT + 1)
@@ -79,7 +87,8 @@ def read_cache(home: Path) -> tuple[bytes, dict]:
 
 
 @contextmanager
-def open_snapshot(path: Path, *, allow_wal: bool = False) -> Iterator[Snapshot]:
+def open_snapshot(path: Path, *, allow_wal: bool = False,
+                  allow_empty_wal: bool = False) -> Iterator[Snapshot]:
     with ExitStack() as guard:
         stream = guard.enter_context(stable_file(path))
         if os.fstat(stream.fileno()).st_size > DB_LIMIT:
@@ -102,8 +111,13 @@ def open_snapshot(path: Path, *, allow_wal: bool = False) -> Iterator[Snapshot]:
                 guard.enter_context(stable_file(sidecars["-shm"]))
             except OSError:
                 raise SnapshotHasSidecars("sqlite sidecars are busy or unsupported") from None
-            if (not 32 <= os.fstat(wal.fileno()).st_size <= DB_LIMIT
-                    or wal.read(4) not in (b"\x37\x7f\x06\x82", b"\x37\x7f\x06\x83")):
+            wal_size = os.fstat(wal.fileno()).st_size
+            # SQLite can leave a zero-byte WAL after a successful TRUNCATE
+            # checkpoint. Accept it only for callers doing read-only diagnosis.
+            if not (allow_empty_wal and wal_size == 0) and (
+                not 32 <= wal_size <= DB_LIMIT
+                or wal.read(4) not in (b"\x37\x7f\x06\x82", b"\x37\x7f\x06\x83")
+            ):
                 raise SnapshotHasSidecars("sqlite WAL header or size")
             # All three Windows file handles deny writes and renames. Rebuild the
             # WAL index in memory without opening the on-disk SHM in SQLite.
@@ -207,7 +221,7 @@ def catalog_status(home: Path, db_home: Path, index: set[str] | None, *,
             counts["desktop_unavailable"] += 1
 
     try:
-        with open_snapshot(db_home / GOAL_NAME, allow_wal=True) as goals:
+        with open_snapshot(db_home / GOAL_NAME, allow_wal=True, allow_empty_wal=True) as goals:
             _goal_status(goals.connection, known, counts, "split")
     except FileNotFoundError:
         pass
@@ -240,17 +254,34 @@ def _thread_ids(db: sqlite3.Connection) -> set[str] | None:
     return known if len(known) == len(rows) else None
 
 
-def pending_assignment_migration(cache: dict) -> dict | None:
+def local_host_record(hosts: object, home: Path) -> dict | None:
+    """Read only the selected profile's scope, without opening any embedded path."""
+    if not isinstance(hosts, dict):
+        return None
+    records = [
+        record for key, record in hosts.items()
+        if key == "local" or (key.startswith("local:") and Path(key[6:]).is_absolute()
+                              and Path(key[6:]) == home)
+    ]
+    if records and isinstance(records[0], dict) and all(record == records[0] for record in records):
+        return records[0]
+    return None
+
+
+def pending_assignment_migration(cache: dict, home: Path | None = None) -> dict | None:
     hosts = cache.get("app-server-projects-migration-by-host")
-    local = hosts.get("local") if isinstance(hosts, dict) else None
+    if home is None:
+        local = hosts.get("local") if isinstance(hosts, dict) else None
+    else:
+        local = local_host_record(hosts, home)
     if (isinstance(local, dict) and local.get("projectsMigrated") is True
             and local.get("threadAssignmentsMigrated") is False):
         return local
     return None
 
 
-def _migration_status(cache: dict, known: set[str] | None, counts: Counter[str]) -> None:
-    local = pending_assignment_migration(cache)
+def _migration_status(cache: dict, home: Path, known: set[str] | None, counts: Counter[str]) -> None:
+    local = pending_assignment_migration(cache, home)
     if local is None:
         return
     counts["desktop_assignment_migration_pending"] += 1
@@ -292,36 +323,47 @@ def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
                 continue
             roots.setdefault(path, set()).add(project.id)
     counts["desktop_root_shared"] += sum(len(owners) > 1 for owners in roots.values())
+    cache = None
     try:
         _, cache = read_cache(home)
-        _migration_status(cache, known, counts)
+        _migration_status(cache, home, known, counts)
+        hosts = cache.get("app-server-projects-migration-by-host")
+        if isinstance(hosts, dict) and any(key.startswith("local:") for key in hosts):
+            counts["desktop_profile_qualified_migration"] += 1
         registry = cache.get("local-projects")
         if catalog and registry == {}:
             counts["desktop_cache_empty"] += 1
         elif catalog and not isinstance(registry, dict):
             counts["desktop_cache_unavailable"] += 1
-        elif isinstance(registry, dict):
+        if isinstance(registry, dict):
             counts["desktop_project_timestamps_missing"] += sum(
                 isinstance(entry, dict) and ("createdAt" not in entry or "updatedAt" not in entry)
                 for entry in registry.values()
             )
             keys = legacy_keys(db)
-            missing = sum(
-                len(keys.get(project_id, [])) == 1 and keys[project_id][0] not in registry
-                for project_id in catalog
-            )
+            missing = 0
+            for project_id in catalog:
+                aliases = keys.get(project_id, [])
+                if not aliases:
+                    counts["desktop_legacy_identity_missing"] += 1
+                elif len(aliases) > 1:
+                    counts["desktop_legacy_identity_ambiguous"] += 1
+                elif aliases[0] not in registry:
+                    missing += 1
             if registry and missing:
                 counts["desktop_cache_incomplete"] += missing
     except (OSError, Unsupported):
         if catalog:
             counts["desktop_cache_unavailable"] += 1
     try:
-        rows = _rows(db, "SELECT project_id, CASE WHEN length(cwd) <= 4096 THEN cwd END "
+        rows = _rows(db, "SELECT id, project_id, CASE WHEN length(cwd) <= 4096 THEN cwd END "
                          "FROM main.threads")
     except Unsupported:
         counts["desktop_thread_limit"] += 1
         return
-    for project_id, cwd in rows:
+    if cache is not None:
+        _cache_link_status(cache, home, {thread: project for thread, project, _ in rows}, catalog, counts)
+    for _, project_id, cwd in rows:
         if project_id is None:
             counts["desktop_unassigned"] += 1
             owners = roots.get(Path(cwd), set()) if isinstance(cwd, str) else set()
@@ -329,6 +371,41 @@ def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
                 counts["desktop_candidates"] += 1
         elif project_id not in catalog:
             counts["desktop_dangling"] += 1
+
+
+def _cache_link_status(cache: dict, home: Path, threads: dict, catalog: dict[str, Project],
+                       counts: Counter[str]) -> None:
+    assignments = cache.get("thread-project-assignments")
+    registry = cache.get("local-projects")
+    if (assignments is not None and not isinstance(assignments, dict)) or not isinstance(registry, dict):
+        return
+    assignments = assignments or {}
+    projectless = cache.get("projectless-thread-ids", [])
+    if not isinstance(projectless, list) or any(not canonical_id(key) for key in projectless):
+        return
+    projectless_ids = set(projectless)
+    hosts = cache.get("app-server-project-id-by-legacy-project-id-by-host")
+    mapping = local_host_record(hosts, home) or {}
+    for thread, value in assignments.items():
+        key = local_assignment_key(value)
+        if not canonical_id(thread) or key is None:
+            continue
+        if isinstance(value, dict):
+            counts["desktop_cache_object_links"] += 1
+        entry = registry.get(key)
+        if thread not in threads or not isinstance(entry, dict) or entry.get("id") != key:
+            counts["desktop_cache_stale_links"] += 1
+        canonical = threads.get(thread)
+        core = mapping.get(key)
+        if thread in projectless_ids or (canonical_id(canonical) and canonical_id(core) and canonical != core):
+            counts["desktop_cache_link_conflicts"] += 1
+    for thread, project in threads.items():
+        if canonical_id(thread) and canonical_id(project) and project in catalog:
+            if thread not in assignments:
+                if thread in projectless_ids:
+                    counts["desktop_cache_link_conflicts"] += 1
+                else:
+                    counts["desktop_canonical_links_without_cache"] += 1
 
 
 def _goal_status(goals: sqlite3.Connection, known: set[str] | None,

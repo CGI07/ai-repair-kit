@@ -13,6 +13,7 @@ from typing import BinaryIO, Iterator
 from uuid import UUID, uuid4
 
 from ..local_files import ordinary_path, pinned_directory, stable_file
+from .codex import installed_desktop_version
 from .codex_diagnostics import inspect_config_bytes, locked_config
 from .codex_repair import RepairError, _publish_backup
 from .desktop_catalog import (
@@ -21,12 +22,20 @@ from .desktop_catalog import (
 )
 
 from .desktop_history import (
-    HISTORY_BUILD, HISTORY_BUILDS, RECENT_HISTORY_BUILD, matches_recent_history, merge_history,
+    HISTORY_BUILD, HISTORY_BUILDS as STRING_LINK_BUILDS, RECENT_HISTORY_BUILD,
+    matches_recent_history, merge_history,
+)
+from .desktop_registry import (
+    OBJECT_LINK_BUILD, PARTIAL_REGISTRY_BUILD, HistoricalEvidenceError, build_registry,
 )
 
 SUPPORTED_BUILD = "26.911.7940.0"
 TIMESTAMP_BUILD = "26.903.8094.0"
 REGISTRY_BUILDS = (SUPPORTED_BUILD, TIMESTAMP_BUILD)
+HISTORY_BUILDS = STRING_LINK_BUILDS
+# Keep the two new rules covered by synthetic lab tests until Desktop GUI
+# verification can establish that applying them preserves project membership.
+LAB_CACHE_BUILDS = (PARTIAL_REGISTRY_BUILD, OBJECT_LINK_BUILD)
 HISTORY_FILENAMES = (CACHE_NAME, CACHE_NAME + ".bak", CACHE_NAME + ".tmp-*")
 
 
@@ -39,6 +48,7 @@ class Plan:
     count: int
     build: str
     uses_wal: bool
+    profile: str
     linked: int = 0
     skipped: int = 0
     history: Path | None = None
@@ -54,6 +64,7 @@ class RestorePlan:
     original_hash: str
     current_hash: str | None
     size: int
+    profile: str
 
 
 def digest(data: bytes) -> str:
@@ -123,12 +134,17 @@ def _timestamp_candidate(db: sqlite3.Connection, cache: dict) -> tuple[bytes, in
 
 
 def _build_candidate(db: sqlite3.Connection, cache: dict, history: bytes | None, build: str):
-    if history is None:
+    if build in LAB_CACHE_BUILDS:
+        merged, count, linked, skipped = build_registry(
+            db, cache, decode_cache(history) if history is not None else None,
+        )
+    elif history is None:
         result, count = _timestamp_candidate(db, cache) if build == TIMESTAMP_BUILD else _candidate(db, cache)
         return result, count, 0, 0
-    if build == RECENT_HISTORY_BUILD and not matches_recent_history(cache):
-        raise RepairError("desktop_ineligible")
-    merged, count, linked, skipped = merge_history(db, cache, decode_cache(history))
+    else:
+        if build == RECENT_HISTORY_BUILD and not matches_recent_history(cache):
+            raise RepairError("desktop_ineligible")
+        merged, count, linked, skipped = merge_history(db, cache, decode_cache(history))
     result = (json.dumps(merged, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
     if decode_cache(result) != merged:
         raise RepairError("desktop_ineligible")
@@ -153,28 +169,60 @@ def _validate_history_path(home: Path, history: Path) -> None:
         raise RepairError("desktop_snapshot_name")
 
 
+def _check_installed_build(home: Path, db_home: Path, build: str) -> None:
+    if build in LAB_CACHE_BUILDS:
+        override = os.environ.get("CODEX_HOME")
+        if db_home != home or (override and Path(override) != home):
+            raise RepairError("desktop_profile_mismatch")
+    if installed_desktop_version() != build:
+        raise RepairError("desktop_version_unverified")
+
+
 def prepare(home: Path, db_home: Path, build: str, history: Path | None = None, *,
             sqlite_override: Path | None = None) -> Plan:
     if build not in (HISTORY_BUILDS if history else REGISTRY_BUILDS):
         raise RepairError("desktop_version")
+    _check_installed_build(home, db_home, build)
     if history is not None:
         _validate_history_path(home, history)
     try:
-        before, cache = read_cache(home)
-        historical = _read_bytes(history) if history is not None else None
-        with locked_config(home) as config:
-            _check_database(home, db_home, config, sqlite_override)
-            with open_snapshot(db_home / STATE_NAME, allow_wal=build == RECENT_HISTORY_BUILD) as snapshot:
-                candidate, count, linked, skipped = _build_candidate(snapshot.connection, cache, historical, build)
+        with pinned_directory(home):
+            return _prepare_pinned(home, db_home, build, history, sqlite_override)
+    except HistoricalEvidenceError as error:
+        raise RepairError(str(error)) from None
     except (ValueError, OSError, sqlite3.Error):
         raise RepairError("desktop_ineligible") from None
-    return Plan(home, db_home, digest(before), digest(candidate), count, build, snapshot.uses_wal, linked, skipped,
-                history, digest(historical) if historical is not None else "",
-                digest(config) if config is not None else None, sqlite_override)
+
+
+def _prepare_pinned(home: Path, db_home: Path, build: str, history: Path | None,
+                    sqlite_override: Path | None) -> Plan:
+    profile = _profile_identity(home)
+    before, cache = read_cache(home)
+    historical = _read_bytes(history) if history is not None else None
+    with locked_config(home) as config:
+        _check_database(home, db_home, config, sqlite_override)
+        with open_snapshot(db_home / STATE_NAME, allow_wal=build == RECENT_HISTORY_BUILD) as snapshot:
+            candidate, count, linked, skipped = _build_candidate(snapshot.connection, cache, historical, build)
+    return Plan(
+        home, db_home, digest(before), digest(candidate), count, build, snapshot.uses_wal, profile,
+        linked, skipped, history, digest(historical) if historical is not None else "",
+        digest(config) if config is not None else None, sqlite_override,
+    )
 
 
 def _profile_key(home: Path) -> str:
     return digest(os.fsencode(os.path.normcase(str(home))))
+
+
+def _profile_identity(home: Path) -> str:
+    info = ordinary_path(home, directory=True)
+    if not info.st_ino:
+        raise RepairError("desktop_ineligible")
+    return digest(f"{_profile_key(home)}:{info.st_dev}:{info.st_ino}".encode("ascii"))
+
+
+def _matches_profile(header: dict, home: Path, identity: str) -> bool:
+    return header["profile"] == (_profile_key(home) if header["format"] == 1 else identity)
 
 
 def _read_bytes(path: Path, limit: int = CACHE_LIMIT) -> bytes:
@@ -213,7 +261,7 @@ def _backup(folder: Path, home: Path, original: bytes, after: str) -> str:
     backup_id = uuid4().hex
     target = folder / (backup_id + ".arkd")
     staging = target.with_suffix(".part")
-    header = {"format": 1, "profile": _profile_key(home), "before": digest(original), "after": after}
+    header = {"format": 2, "profile": _profile_identity(home), "before": digest(original), "after": after}
     with pinned_directory(folder):
         _write_new(staging, json.dumps(header).encode("ascii") + b"\n" + original)
         _publish_backup(staging, target)
@@ -222,7 +270,7 @@ def _backup(folder: Path, home: Path, original: bytes, after: str) -> str:
     return backup_id
 
 
-def _read_backup(folder: Path, backup_id: str, *, profile: str | None = None) -> tuple[dict, bytes]:
+def _read_backup(folder: Path, backup_id: str) -> tuple[dict, bytes]:
     try:
         if UUID(backup_id).hex != backup_id:
             raise ValueError
@@ -232,11 +280,10 @@ def _read_backup(folder: Path, backup_id: str, *, profile: str | None = None) ->
                 raise ValueError
             metadata = json.loads(header)
             if (not isinstance(metadata, dict) or set(metadata) != {"format", "profile", "before", "after"}
-                    or type(metadata["format"]) is not int or metadata["format"] != 1
+                    or type(metadata["format"]) is not int or metadata["format"] not in (1, 2)
                     or not all(isinstance(metadata[key], str) and len(metadata[key]) == 64
                                and all(char in "0123456789abcdef" for char in metadata[key])
-                               for key in ("before", "after", "profile"))
-                    or (profile is not None and metadata["profile"] != profile)):
+                               for key in ("before", "after", "profile"))):
                 raise ValueError
             content = stream.read(CACHE_LIMIT + 1)
         decode_cache(content)
@@ -263,11 +310,16 @@ def list_backups(store: Path, *, home: Path | None = None) -> list[str]:
                     candidates.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name[:-5]))
             except OSError:
                 continue
-    profile = _profile_key(home) if home is not None else None
+    try:
+        profile = _profile_identity(home) if home is not None else ""
+    except FileNotFoundError:
+        return []
     verified = []
     for _, key in sorted(candidates, reverse=True):
         try:
-            _read_backup(folder, key, profile=profile)
+            header, _ = _read_backup(folder, key)
+            if home is not None and not _matches_profile(header, home, profile):
+                continue
         except RepairError:
             continue
         verified.append(key)
@@ -303,16 +355,18 @@ def _displaced_original(home: Path, backup_id: str, original: bytes) -> Path:
 
 
 def prepare_restore(home: Path, store: Path, backup_id: str) -> RestorePlan:
-    header, original = _read_backup(store / "desktop", backup_id)
-    if header["profile"] != _profile_key(home):
-        raise RepairError("stale")
-    current = _current_cache(home)
-    current_hash = digest(current) if current is not None else None
-    if current_hash is None:
-        _displaced_original(home, backup_id, original)
-    elif current_hash != header["after"]:
-        raise RepairError("stale")
-    return RestorePlan(home, backup_id, header["before"], current_hash, len(original))
+    with pinned_directory(home):
+        profile = _profile_identity(home)
+        header, original = _read_backup(store / "desktop", backup_id)
+        if not _matches_profile(header, home, profile):
+            raise RepairError("stale")
+        current = _current_cache(home)
+        current_hash = digest(current) if current is not None else None
+        if current_hash is None:
+            _displaced_original(home, backup_id, original)
+        elif current_hash != header["after"]:
+            raise RepairError("stale")
+        return RestorePlan(home, backup_id, header["before"], current_hash, len(original), profile)
 
 
 def apply(plan: Plan, store: Path, *, approved: bool) -> str:
@@ -324,14 +378,18 @@ def apply(plan: Plan, store: Path, *, approved: bool) -> str:
         _validate_history_path(plan.home, plan.history)
     with _mutex(plan.home), pinned_directory(plan.home):
         ensure_closed()
+        if _profile_identity(plan.home) != plan.profile:
+            raise RepairError("stale")
+        _check_installed_build(plan.home, plan.db_home, plan.build)
         try:
             with locked_config(plan.home) as config, ExitStack() as guards:
                 config_hash = digest(config) if config is not None else None
                 if config_hash != plan.config_hash:
                     raise RepairError("stale")
                 _check_database(plan.home, plan.db_home, config, plan.sqlite_override)
+                state_path = plan.db_home / STATE_NAME
                 snapshot = guards.enter_context(open_snapshot(
-                    plan.db_home / STATE_NAME, allow_wal=plan.build == RECENT_HISTORY_BUILD,
+                    state_path, allow_wal=plan.build == RECENT_HISTORY_BUILD,
                 ))
                 if snapshot.uses_wal != plan.uses_wal:
                     raise RepairError("stale")
@@ -352,9 +410,15 @@ def apply(plan: Plan, store: Path, *, approved: bool) -> str:
                     raise RepairError("stale")
                 folder = _safe_store(store, plan.home)
                 backup_id = _backup(folder, plan.home, before, plan.after)
+                _check_installed_build(plan.home, plan.db_home, plan.build)
+                journals = ("-journal",) if snapshot.uses_wal else ("-journal", "-wal", "-shm")
+                for suffix in journals:
+                    _require_missing(state_path.with_name(state_path.name + suffix))
                 missing_config = plan.home / "config.toml" if config is None else None
                 _replace_checked(plan.home / CACHE_NAME, before, candidate, backup_id,
                                  missing_config=missing_config)
+        except HistoricalEvidenceError as error:
+            raise RepairError(str(error)) from None
         except (Unsupported, sqlite3.Error) as error:
             raise RepairError("desktop_ineligible") from error
     return backup_id
@@ -366,8 +430,9 @@ def restore(plan: RestorePlan, store: Path, *, approved: bool) -> str | None:
     with _mutex(plan.home), pinned_directory(plan.home):
         ensure_closed()
         header, original = _read_backup(store / "desktop", plan.backup_id)
-        if (header["profile"] != _profile_key(plan.home) or header["before"] != plan.original_hash
-                or len(original) != plan.size):
+        profile = _profile_identity(plan.home)
+        if (profile != plan.profile or not _matches_profile(header, plan.home, profile)
+                or header["before"] != plan.original_hash or len(original) != plan.size):
             raise RepairError("stale")
         target = plan.home / CACHE_NAME
         if plan.current_hash is None:
@@ -384,19 +449,29 @@ def restore(plan: RestorePlan, store: Path, *, approved: bool) -> str | None:
 
 def _restore_missing_cache(plan: RestorePlan, target: Path, original: bytes) -> None:
     ensure_closed()
-    displaced = _displaced_original(plan.home, plan.backup_id, original)
-    _require_missing(target)
-    try:
-        # Move the original within the profile without overwrite, retaining its metadata.
-        _publish_backup(displaced, target)
-    except OSError:
+    displaced = plan.home / (".ark-" + plan.backup_id + ".original")
+    with ExitStack() as guard:
+        try:
+            source = guard.enter_context(stable_file(displaced, allow_rename=True))
+        except FileNotFoundError:
+            raise RepairError("stale") from None
+        if _read_bounded(source) != original:
+            raise RepairError("stale")
+        expected = os.fstat(source.fileno())
         _require_missing(target)
-        raise
-    try:
-        if _read_bytes(target) != original:
-            raise RepairError("rollback_failed")
-    except OSError:
-        raise RepairError("rollback_failed") from None
+        try:
+            # Preserve the open original and its metadata without overwriting a new target.
+            _publish_backup(displaced, target)
+        except OSError:
+            _require_missing(target)
+            raise
+        try:
+            with stable_file(target) as restored:
+                if (not os.path.samestat(expected, os.fstat(restored.fileno()))
+                        or _read_bounded(restored) != original):
+                    raise RepairError("rollback_failed")
+        except OSError:
+            raise RepairError("rollback_failed") from None
 
 
 def _replace_checked(target: Path, before: bytes, after: bytes, backup_id: str, *,

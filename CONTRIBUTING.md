@@ -12,6 +12,8 @@ From the repository in PowerShell, use the Python 3.11 environment described in 
 
 The tests exercise the actual widgets, language and theme changes, guarded repair and rollback, and isolate settings in temporary INI files under the ignored `.test-work/` directory. To run without a Windows desktop session, set `$env:QT_QPA_PLATFORM = 'offscreen'` before running the tests. A manual desktop check should cover the five pages, Tab and arrow navigation, both themes and both languages, and smaller window sizes. For end-to-end recovery verification, use the [isolated Windows VM procedure](docs/desktop-vm-verification.md).
 
+Keep repeatable build intermediates in `build/` and disposable lab builds under `.test-work/scratch/builds/`. Keep the `dist/` output, final verification builds, backups and their evidence separate from scratch space. Run `.\.venv\Scripts\python.exe -B scripts\inspect_test_artifacts.py` to preview scratch paths and estimate their size before any manual cleanup. The preview uses file lengths, which may differ from allocated space. Close the relevant builds and tests before removing scratch artifacts.
+
 Use synthetic fixtures for tests and public reports. Keep private logs, settings, credentials, and user data out of the repository.
 
 ## Review before sharing
@@ -24,14 +26,19 @@ For recovery changes, explain the evidence that makes a case eligible, how stale
 
 ## Build the Windows candidate
 
-From a Windows x64 checkout with the project Python 3.11 virtual environment:
+Use a clean Windows x64 checkout at the revision you want to verify. The release workflow uses Python 3.11.9. Create a fresh project virtual environment with that interpreter, then run these commands:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[package]"
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: --require-hashes -r scripts/windows-build-requirements.txt
+$env:QT_QPA_PLATFORM = 'offscreen'
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Remove-Item Env:QT_QPA_PLATFORM
 .\scripts\build_windows.ps1
+.\.venv\Scripts\python.exe scripts/prepare_windows_notices.py build/windows-notices
+.\scripts\package_windows.ps1 -OutputDirectory candidate -NoticesDirectory build/windows-notices
 ```
 
-The executable is `dist/AI-Repair-Kit/AI-Repair-Kit.exe`. Keep the whole directory together. The script checks for an existing output folder and prints the executable hash. Verify launch and close on the Windows desktop. Use synthetic data for a full repair and rollback check. Release signing, dependency redistribution materials, and publication are separate steps.
+Use a fresh output directory and stop if any command fails. The package includes the EXE, adjacent `_internal`, and dependency notices. Record the source revision, archive and EXE hashes, and dependency versions. Compare the embedded application modules, translations and bundled dependencies when auditing a binary against source. Archive timestamps and executable build metadata can differ between runs. The SHA-256 values for a specific download are in that release's `SHA256SUMS.txt`.
 
 ## Translations
 

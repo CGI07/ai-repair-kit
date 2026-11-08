@@ -13,6 +13,7 @@ from typing import Iterator
 from uuid import UUID
 
 from ..local_files import UnsafePath, ordinary_path, stable_file
+from .codex import installed_desktop_version
 from .desktop_catalog import (
     STATE_NAME, DamagedSnapshot, SnapshotHasSidecars, catalog_status, check_rollout_file,
     columns, local_rollout_path, open_snapshot,
@@ -52,6 +53,16 @@ class Code(Enum):
     DESKTOP_CACHE_EMPTY = "desktop_cache_empty"
     DESKTOP_CACHE_UNAVAILABLE = "desktop_cache_unavailable"
     DESKTOP_CACHE_INCOMPLETE = "desktop_cache_incomplete"
+    CODEX_HOME_OVERRIDE = "codex_home_override"
+    CODEX_HOME_MISMATCH = "codex_home_mismatch"
+    DB_HOME_REDIRECTED = "db_home_redirected"
+    DESKTOP_PROFILE_QUALIFIED_MIGRATION = "desktop_profile_qualified_migration"
+    DESKTOP_LEGACY_IDENTITY_MISSING = "desktop_legacy_identity_missing"
+    DESKTOP_LEGACY_IDENTITY_AMBIGUOUS = "desktop_legacy_identity_ambiguous"
+    DESKTOP_CACHE_OBJECT_LINKS = "desktop_cache_object_links"
+    DESKTOP_CACHE_STALE_LINKS = "desktop_cache_stale_links"
+    DESKTOP_CACHE_LINK_CONFLICTS = "desktop_cache_link_conflicts"
+    DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE = "desktop_canonical_links_without_cache"
     DESKTOP_PROJECT_TIMESTAMPS_MISSING = "desktop_project_timestamps_missing"
     DESKTOP_ROOT_SHARED = "desktop_root_shared"
     DESKTOP_ASSIGNMENT_MIGRATION_PENDING = "desktop_assignment_migration_pending"
@@ -88,30 +99,42 @@ class Report:
     null_config_size: int = 0
     db_home: Path | None = None
     sqlite_override: Path | None = None
+    desktop_version: str | None = None
 
 
-def inspect(home: Path, sqlite_override: Path | None = None) -> Report:
+def inspect(home: Path, sqlite_override: Path | None = None, *,
+            check_desktop_version: bool = False) -> Report:
+    version = installed_desktop_version() if check_desktop_version else None
+    findings = []
+    override = os.environ.get("CODEX_HOME")
+    if override:
+        code = Code.CODEX_HOME_OVERRIDE if home == Path(override) else Code.CODEX_HOME_MISMATCH
+        findings.append(Finding(code))
     try:
         ordinary_path(home, directory=True)
     except FileNotFoundError:
-        return Report((Finding(Code.HOME_MISSING),))
+        return Report((*findings, Finding(Code.HOME_MISSING)), desktop_version=version)
     except OSError:
-        return Report((Finding(Code.HOME_UNAVAILABLE),))
+        return Report((*findings, Finding(Code.HOME_UNAVAILABLE)), desktop_version=version)
 
     config_issue, null_size, config_db_home = _config(home / "config.toml")
-    results = [config_issue] if config_issue else []
+    results = findings
+    if config_issue:
+        results.append(config_issue)
     index: set[str] = set()
     index_findings = _session_index(home / "session_index.jsonl", index)
     results.extend(index_findings)
     # User-config sqlite_home takes precedence. Relative paths are intentionally
     # unsupported here because the active Codex config stack can change the base.
     db_home = config_db_home or sqlite_override or home
+    if db_home != home:
+        results.append(Finding(Code.DB_HOME_REDIRECTED))
     with ExitStack() as snapshots:
         state_findings, state = _state_db(home, db_home, snapshots)
         results.extend(state_findings)
         desktop = catalog_status(home, db_home, None if index_findings else index, state=state)
     results.extend(Finding(Code(key), count) for key, count in desktop.items())
-    return Report(tuple(results), null_size, db_home, sqlite_override)
+    return Report(tuple(results), null_size, db_home, sqlite_override, version)
 
 
 @contextmanager
@@ -189,7 +212,9 @@ def _index_entry(entry: object) -> bool:
 
 def _state_db(home: Path, db_home: Path, snapshots: ExitStack) -> tuple[list[Finding], sqlite3.Connection | None]:
     try:
-        snapshot = snapshots.enter_context(open_snapshot(db_home / STATE_NAME, allow_wal=True))
+        snapshot = snapshots.enter_context(
+            open_snapshot(db_home / STATE_NAME, allow_wal=True, allow_empty_wal=True)
+        )
         db = snapshot.connection
         if not {"id", "cwd", "rollout_path"} <= columns(db, "threads").keys():
             return [Finding(Code.DB_SCHEMA)], None

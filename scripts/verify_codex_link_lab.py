@@ -40,7 +40,7 @@ def powershell_json(command: str) -> dict:
     return json.loads(result.stdout)
 
 
-def lab_executable(expected_uuid: UUID) -> Path:
+def check_guest_isolation(expected_uuid: UUID) -> None:
     require(os.name == "nt" and os.environ.get("USERNAME") == "ArkLab",
             "Use the local ArkLab account in the offline Windows guest.")
     machine = powershell_json(
@@ -54,6 +54,10 @@ def lab_executable(expected_uuid: UUID) -> Path:
         "shares=@(Get-SmbMapping).Count} | ConvertTo-Json"
     )
     require(not any(isolated.values()), "The guest has an external address, default route, or SMB mapping.")
+
+
+def lab_executable(expected_uuid: UUID) -> Path:
+    check_guest_isolation(expected_uuid)
     package = powershell_json(
         "$p=Get-AppxPackage -Name OpenAI.Codex; "
         "@{Version=$p.Version.ToString();Status=$p.Status.ToString();"
@@ -106,18 +110,21 @@ class AppServer:
             raise RuntimeError(f"{method} failed with RPC code {reply['error']['code']}.")
         return reply["result"]
 
-    def initialize(self) -> None:
+    def initialize(self, expected_version: str | None) -> None:
         result = self.call(
             "initialize",
             clientInfo={"name": "ark_link_lab", "title": "AI Repair Kit link lab", "version": "1.0.0"},
             capabilities={"experimentalApi": True},
         )
-        require("/0.166.0-alpha.6 " in result["userAgent"], "Unexpected App Server build.")
+        self.user_agent = result["userAgent"]
+        if expected_version is not None:
+            require(f"/{expected_version} " in self.user_agent, "Unexpected App Server build.")
         self._send({"method": "initialized"})
 
 
 @contextmanager
-def open_server(executable: Path, profile: Path):
+def open_server(executable: Path, profile: Path, *,
+                expected_version: str | None = "0.166.0-alpha.6"):
     environment = dict(os.environ, CODEX_HOME=str(profile), CODEX_SQLITE_HOME=str(profile))
     with subprocess.Popen(
         [executable, "app-server", "--listen", "stdio://"],
@@ -127,7 +134,7 @@ def open_server(executable: Path, profile: Path):
     ) as process:
         server = AppServer(process)
         try:
-            server.initialize()
+            server.initialize(expected_version)
             yield server
         finally:
             assert process.stdin is not None

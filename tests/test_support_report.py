@@ -31,3 +31,13 @@ class SupportReportTests(unittest.TestCase):
         self.assertEqual(summary["operation_outcome"], "rollback_failed")
         self.assertNotIn("thread_check", summary)
         self.assertNotIn("last_scan", summary)
+
+    def test_export_uses_only_a_bounded_msix_version_and_fixed_evidence_codes(self) -> None:
+        scan = Report((Finding(Code.DESKTOP_CACHE_LINK_CONFLICTS, 2),),
+                      desktop_version="26.924.2738.0")
+        result = json.loads(format_report(scan, None, "desktop_snapshot_conflict"))
+        self.assertEqual(result["codex_desktop_msix"], "26.924.2738.0")
+        self.assertEqual(result["last_scan"], {"desktop_cache_link_conflicts": 2})
+        self.assertEqual(result["operation_outcome"], "desktop_snapshot_conflict")
+        malformed = Report((), desktop_version="26.924.2738.0 private-path")
+        self.assertNotIn("private-path", format_report(malformed, None, ""))
