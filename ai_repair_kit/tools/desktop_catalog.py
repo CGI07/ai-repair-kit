@@ -211,14 +211,17 @@ def catalog_status(home: Path, db_home: Path, index: set[str] | None, *,
                    state: sqlite3.Connection | None) -> dict[str, int]:
     """Compare against the same guarded state snapshot used by the main scan."""
     counts: Counter[str] = Counter()
-    known: set[str] | None = None
+    known = _thread_ids(state) if state is not None else None
+    cache = _cache_status(home, known, counts)
     if state is not None:
         try:
-            known = _thread_ids(state)
-            _project_status(home, state, known, counts)
-            _goal_status(state, known, counts, "legacy")
+            _project_status(home, state, cache, counts)
         except (OSError, ValueError, sqlite3.Error):
             counts["desktop_unavailable"] += 1
+        try:
+            _goal_status(state, known, counts, "legacy")
+        except (OSError, ValueError, sqlite3.Error):
+            counts["goal_unavailable"] += 1
 
     try:
         with open_snapshot(db_home / GOAL_NAME, allow_wal=True, allow_empty_wal=True) as goals:
@@ -244,9 +247,9 @@ def catalog_status(home: Path, db_home: Path, index: set[str] | None, *,
 
 
 def _thread_ids(db: sqlite3.Connection) -> set[str] | None:
-    if "id" not in columns(db, "threads"):
-        return None
     try:
+        if "id" not in columns(db, "threads"):
+            return None
         rows = _rows(db, "SELECT id FROM main.threads")
     except (sqlite3.Error, Unsupported):
         return None
@@ -296,13 +299,33 @@ def _migration_status(cache: dict, home: Path, known: set[str] | None, counts: C
             counts["desktop_assignment_projectless"] += len(set(pending) & set(projectless))
 
 
-def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
+def _cache_status(home: Path, known: set[str] | None, counts: Counter[str]) -> dict | None:
+    try:
+        _, cache = read_cache(home)
+    except FileNotFoundError:
+        return None
+    except (OSError, Unsupported):
+        counts["desktop_cache_unavailable"] += 1
+        return None
+    _migration_status(cache, home, known, counts)
+    hosts = cache.get("app-server-projects-migration-by-host")
+    if isinstance(hosts, dict) and any(key.startswith("local:") for key in hosts):
+        counts["desktop_profile_qualified_migration"] += 1
+    registry = cache.get("local-projects")
+    if not isinstance(registry, dict):
+        counts["desktop_cache_unavailable"] += 1
+    else:
+        counts["desktop_project_timestamps_missing"] += sum(
+            isinstance(entry, dict) and ("createdAt" not in entry or "updatedAt" not in entry)
+            for entry in registry.values()
+        )
+    return cache
+
+
+def _project_status(home: Path, db: sqlite3.Connection, cache: dict | None,
                     counts: Counter[str]) -> None:
     thread_cols = columns(db, "threads")
     if "project_id" not in thread_cols and not columns(db, "projects"):
-        return
-    if not {"id", "project_id", "cwd"} <= thread_cols.keys():
-        counts["desktop_schema"] += 1
         return
     try:
         catalog = projects(db)
@@ -323,24 +346,17 @@ def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
                 continue
             roots.setdefault(path, set()).add(project.id)
     counts["desktop_root_shared"] += sum(len(owners) > 1 for owners in roots.values())
-    cache = None
-    try:
-        _, cache = read_cache(home)
-        _migration_status(cache, home, known, counts)
-        hosts = cache.get("app-server-projects-migration-by-host")
-        if isinstance(hosts, dict) and any(key.startswith("local:") for key in hosts):
-            counts["desktop_profile_qualified_migration"] += 1
-        registry = cache.get("local-projects")
-        if catalog and registry == {}:
-            counts["desktop_cache_empty"] += 1
-        elif catalog and not isinstance(registry, dict):
-            counts["desktop_cache_unavailable"] += 1
-        if isinstance(registry, dict):
-            counts["desktop_project_timestamps_missing"] += sum(
-                isinstance(entry, dict) and ("createdAt" not in entry or "updatedAt" not in entry)
-                for entry in registry.values()
-            )
+    registry = cache.get("local-projects") if cache is not None else None
+    if catalog and cache is None:
+        counts["desktop_cache_unavailable"] = 1
+    if catalog and registry == {}:
+        counts["desktop_cache_empty"] += 1
+    if isinstance(registry, dict):
+        try:
             keys = legacy_keys(db)
+        except (sqlite3.Error, Unsupported):
+            counts["desktop_schema"] += 1
+        else:
             missing = 0
             for project_id in catalog:
                 aliases = keys.get(project_id, [])
@@ -352,9 +368,9 @@ def _project_status(home: Path, db: sqlite3.Connection, known: set[str] | None,
                     missing += 1
             if registry and missing:
                 counts["desktop_cache_incomplete"] += missing
-    except (OSError, Unsupported):
-        if catalog:
-            counts["desktop_cache_unavailable"] += 1
+    if not {"id", "project_id", "cwd"} <= thread_cols.keys():
+        counts["desktop_schema"] = 1
+        return
     try:
         rows = _rows(db, "SELECT id, project_id, CASE WHEN length(cwd) <= 4096 THEN cwd END "
                          "FROM main.threads")
@@ -393,12 +409,18 @@ def _cache_link_status(cache: dict, home: Path, threads: dict, catalog: dict[str
         if isinstance(value, dict):
             counts["desktop_cache_object_links"] += 1
         entry = registry.get(key)
-        if thread not in threads or not isinstance(entry, dict) or entry.get("id") != key:
+        has_entry = isinstance(entry, dict) and entry.get("id") == key
+        if thread not in threads or not has_entry:
             counts["desktop_cache_stale_links"] += 1
         canonical = threads.get(thread)
         core = mapping.get(key)
         if thread in projectless_ids or (canonical_id(canonical) and canonical_id(core) and canonical != core):
             counts["desktop_cache_link_conflicts"] += 1
+        elif thread in threads and canonical_id(core) and core in catalog:
+            if key not in registry and (canonical is None or canonical == core):
+                counts["desktop_cache_links_without_registry"] += 1
+            elif has_entry and canonical is None:
+                counts["desktop_cache_links_without_sqlite"] += 1
     for thread, project in threads.items():
         if canonical_id(thread) and canonical_id(project) and project in catalog:
             if thread not in assignments:

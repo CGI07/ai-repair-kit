@@ -1,6 +1,18 @@
 # Changelog
 
-## 1.0.0rc3 · Prerelease candidate
+## 1.0.0rc4 · Windows prerelease
+
+- Distinguish retained chat links from missing Desktop project registrations when SQLite corroborates the local mapping.
+- Reproduce No projects in the isolated MSIX `26.1103.4239.0` Desktop GUI after clearing only the synthetic registry. Preserve a separate verified baseline before Desktop rotates its companion backup.
+- Add an experimental, version-independent registry-only repair for the verified same-account snapshot layout. Preserve historical Desktop timestamps and existing chat assignments, and refuse conflicting or incomplete evidence.
+- Check the actual cache layout and SQLite evidence for recovery candidates, including when the installed MSIX has no write rule. Continue independent metadata checks when one store is unavailable.
+- Allow the timestamp-only repair on a registered x64 Store package with a compatible legacy layout and exact active-profile evidence. Continue to require approval, a verified backup, and a fresh package and source check before replacement.
+- Keep writes blocked for unverified account and profile layouts. Report candidate changes and excluded links separately from permission to write.
+- Allow the lab isolation checker to validate saved VMs before a normal resume.
+- Verify full registry recovery using the packaged Windows EXE and confirm both original projects and chats in isolated Codex Desktop MSIX `26.1103.4239.0` after restart. Verify backup and byte-for-byte rollback through the product UI. Reject rollback if Desktop has since reserialized the cache. Cover partial registry loss, missing chat links and conflicting migration evidence in synthetic regression tests.
+- Report retained Desktop cache links when SQLite has no project assignment. With a verified snapshot, count absent cache links confirmed by explicit SQLite membership separately from unconfirmed links. The snapshot comparison remains read-only.
+
+## 1.0.0rc3 · Published prerelease
 
 - Added synthetic lab coverage for missing project registrations on MSIX `26.915.4065.0` and object-shaped cache links on MSIX `26.924.2738.0`. Both versions remain diagnostic-only in the distributed build until Desktop recovery can be verified.
 - Added read-only findings for profile redirects, missing or ambiguous original project IDs, stale or conflicting cache links, and SQLite links missing from the cache.

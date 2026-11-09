@@ -105,7 +105,123 @@ class DesktopFixture(unittest.TestCase):
         return snapshot
 
 
+    def scoped_fixture(self):
+        from ai_repair_kit.tools.desktop_compatibility import ACCOUNT_STATE, MIGRATION
+        from ai_repair_kit.tools.desktop_history import ASSIGNMENTS, HOST_MAP, ORDER, REGISTRY
+
+        alias = str(UUID(int=600))
+        scope = f"local:{self.home}"
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("UPDATE project_idempotency_keys SET key = ?", (alias,))
+            db.commit()
+        history = {
+            ACCOUNT_STATE: {"owner": "fixture-active-owner", "inactive": {}},
+            HOST_MAP: {scope: {alias: CORE}},
+            MIGRATION: {scope: {"version": 1, "projectsMigrated": True,
+                                "threadAssignmentsMigrated": False,
+                                "pendingThreadAssignmentIds": [THREAD]}},
+            ORDER: [alias],
+            ASSIGNMENTS: {THREAD: {"projectKind": "local", "projectId": alias}},
+            REGISTRY: {alias: {"id": alias, "name": "Fixture", "rootPaths": [str(self.root)],
+                               "createdAt": 100, "updatedAt": 120}},
+        }
+        past = self.base / repair.CACHE_NAME
+        past.write_text(json.dumps(history), encoding="utf-8")
+        current = {**history, REGISTRY: {}, "retained": {"changed_after_backup": True}}
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        return past, current, history
+
+
 class DesktopDiagnostics(DesktopFixture):
+    def test_assessment_depends_on_evidence_not_package_version(self):
+        before = {path: path.read_bytes() for path in (self.cache, self.state)}
+        for version in (None, repair.SUPPORTED_BUILD, "99.1234.5678.0"):
+            with self.subTest(version=version):
+                self.installed_desktop_version.return_value = version
+                self.installed_desktop_version.reset_mock()
+                result = repair.assess(self.home, self.home)
+                self.installed_desktop_version.assert_not_called()
+                self.assertEqual(result.outcome, "desktop_candidate")
+                self.assertEqual((result.projects, result.links), (1, 0))
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+                self.assertFalse(self.store.exists())
+
+    def test_timestamp_assessment_accepts_exact_shape_and_refuses_conflicting_values(self):
+        before = self.timestamp_cache()
+        self.installed_desktop_version.return_value = "99.1234.5678.0"
+        self.installed_desktop_version.reset_mock()
+        result = repair.assess(self.home, self.home)
+        self.assertEqual((result.outcome, result.operation, result.projects),
+                         ("desktop_candidate", repair.Operation.TIMESTAMPS, 1))
+        self.assertEqual(self.cache.read_bytes(), before)
+        current = json.loads(before)
+        current["local-projects"]["legacy"]["createdAt"] = 999
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        self.assertEqual(repair.assess(self.home, self.home).outcome, "desktop_ineligible")
+        self.installed_desktop_version.assert_not_called()
+        self.assertFalse(self.store.exists())
+
+    def test_assessment_distinguishes_format_evidence_and_normal_state(self):
+        self.installed_desktop_version.return_value = repair.SUPPORTED_BUILD
+        self.cache.write_text('{"local-projects":{},"electron-account-renderer-state-v1":{}}',
+                              encoding="utf-8")
+        self.assertEqual(repair.assess(self.home, self.home).outcome, "desktop_format")
+        current = json.loads(self.timestamp_cache())
+        current["local-projects"]["legacy"].update(createdAt=10, updatedAt=20)
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        self.assertEqual(repair.assess(self.home, self.home).outcome, "desktop_no_changes")
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("DROP TABLE project_idempotency_keys")
+        self.assertEqual(repair.assess(self.home, self.home).outcome, "desktop_schema")
+        self.assertFalse(self.store.exists())
+
+    def test_project_scan_failure_still_checks_legacy_goal(self):
+        from ai_repair_kit.tools.desktop_catalog import Unsupported, catalog_status
+
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("CREATE TABLE threads(id TEXT)")
+            db.execute("INSERT INTO threads VALUES (?)", (THREAD,))
+            db.execute("CREATE TABLE thread_goals(thread_id TEXT PRIMARY KEY, goal_id TEXT, "
+                       "status TEXT, objective TEXT)")
+            db.execute("INSERT INTO thread_goals VALUES (?, ?, 'active', '')", (THREAD, CORE))
+            with patch("ai_repair_kit.tools.desktop_catalog._project_status",
+                       side_effect=Unsupported("fixture schema")):
+                counts = catalog_status(self.home, self.home, None, state=db)
+        self.assertEqual(counts["desktop_unavailable"], 1)
+        self.assertEqual(counts["goal_legacy"], 1)
+
+    def test_partial_diagnostics_keep_cache_and_projects_when_thread_schema_is_unknown(self):
+        data = json.loads(self.timestamp_cache())
+        data["app-server-projects-migration-by-host"] = {
+            "local": {"projectsMigrated": True, "threadAssignmentsMigrated": False},
+        }
+        self.cache.write_text(json.dumps(data), encoding="utf-8")
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("DROP TABLE threads")
+        before = {path: path.read_bytes() for path in (self.cache, self.state)}
+        found = {finding.code: finding.count for finding in inspect(self.home).findings}
+        self.assertIn(Code.DB_SCHEMA, found)
+        self.assertEqual(found[Code.DESKTOP_PROJECTS], 1)
+        self.assertEqual(found[Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING], 1)
+        self.assertEqual(found[Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING], 1)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+        self.state.unlink()
+        found = {finding.code: finding.count for finding in inspect(self.home).findings}
+        self.assertIn(Code.DB_MISSING, found)
+        self.assertNotIn(Code.DESKTOP_PROJECTS, found)
+        self.assertEqual(found[Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING], 1)
+        self.assertEqual(self.cache.read_bytes(), before[self.cache])
+
+    def test_historical_assessment_checks_original_ids_without_backup_or_write(self):
+        historical = self.historical()
+        before = {path: path.read_bytes() for path in (self.cache, self.state, historical)}
+        result = repair.assess(self.home, self.home, historical)
+        self.assertEqual(result.outcome, "desktop_candidate")
+        self.assertEqual((result.projects, result.links, result.skipped), (1, 1, 1))
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertFalse(self.store.exists())
+
     def test_release_refuses_preview_and_apply_for_diagnostic_only_builds(self):
         original = self.plan()
         for build, history in (
@@ -122,6 +238,198 @@ class DesktopDiagnostics(DesktopFixture):
                                  self.store, approved=True)
         self.assertEqual(self.cache.read_bytes(), self.original)
         self.assertFalse(self.store.exists())
+
+    def test_scan_distinguishes_registry_and_thread_failures_on_same_baseline(self):
+        from copy import deepcopy
+
+        second_root = self.base / "second-project"
+        second_root.mkdir()
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("INSERT INTO projects VALUES (?, 'Second fixture', 1, 10, 20)", (FILE_ONLY,))
+            db.execute("INSERT INTO project_roots VALUES (?, 0, ?)", (FILE_ONLY, str(second_root)))
+            db.execute("INSERT INTO project_idempotency_keys VALUES ('second', ?)", (FILE_ONLY,))
+            db.execute("UPDATE threads SET project_id = ? WHERE id = ?", (CORE, THREAD))
+            db.execute("INSERT INTO threads VALUES (?, ?, ?, NULL)", (ORPHAN, FILE_ONLY, str(second_root)))
+            db.commit()
+
+        registry = "local-projects"
+        assignments = "thread-project-assignments"
+        migration = "app-server-projects-migration-by-host"
+        baseline = {
+            registry: {
+                "legacy": {"id": "legacy", "name": "Fixture", "rootPaths": [str(self.root)],
+                           "createdAt": 10, "updatedAt": 20},
+                "second": {"id": "second", "name": "Second fixture", "rootPaths": [str(second_root)],
+                           "createdAt": 10, "updatedAt": 20},
+            },
+            assignments: {
+                THREAD: {"projectKind": "local", "projectId": "legacy"},
+                ORPHAN: {"projectKind": "local", "projectId": "second"},
+            },
+            "app-server-project-id-by-legacy-project-id-by-host": {
+                "local": {"legacy": CORE, "second": FILE_ONLY},
+            },
+            migration: {"local": {"projectsMigrated": True, "threadAssignmentsMigrated": True}},
+        }
+        cases = {
+            "intact": (None, {}),
+            "empty_registry": (
+                lambda cache: cache[registry].clear(),
+                {Code.DESKTOP_CACHE_EMPTY: 1, Code.DESKTOP_CACHE_STALE_LINKS: 2,
+                 Code.DESKTOP_CACHE_LINKS_WITHOUT_REGISTRY: 2},
+            ),
+            "partial_registry": (
+                lambda cache: cache[registry].pop("second"),
+                {Code.DESKTOP_CACHE_INCOMPLETE: 1, Code.DESKTOP_CACHE_STALE_LINKS: 1,
+                 Code.DESKTOP_CACHE_LINKS_WITHOUT_REGISTRY: 1},
+            ),
+            "conflicting_project_link": (
+                lambda cache: cache[assignments][ORPHAN].update(projectId="legacy"),
+                {Code.DESKTOP_CACHE_LINK_CONFLICTS: 1},
+            ),
+            "missing_cache_link": (
+                lambda cache: cache[assignments].pop(ORPHAN),
+                {Code.DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE: 1},
+            ),
+            "unfinished_migration": (
+                lambda cache: cache[migration]["local"].update(
+                    threadAssignmentsMigrated=False, pendingThreadAssignmentIds=[THREAD],
+                ),
+                {Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING: 1},
+            ),
+        }
+        tracked = {code for _, expected in cases.values() for code in expected}
+        self.installed_desktop_version.return_value = "26.1103.4239.0"
+        for case, (change, expected) in cases.items():
+            with self.subTest(case=case):
+                cache = deepcopy(baseline)
+                if change:
+                    change(cache)
+                self.cache.write_text(json.dumps(cache), encoding="utf-8")
+                before = {path: path.read_bytes() for path in (self.state, self.cache)}
+
+                report = inspect(self.home)
+                findings = {item.code: item.count for item in report.findings}
+                self.assertEqual(findings[Code.DESKTOP_PROJECTS], 2)
+                self.assertEqual({code: findings[code] for code in tracked if code in findings}, expected)
+                with self.assertRaisesRegex(RepairError, "^desktop_version$"):
+                    repair.prepare(self.home, self.home, "26.1103.4239.0")
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+                self.assertFalse(self.store.exists())
+
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("UPDATE threads SET project_id = NULL WHERE id = ?", (ORPHAN,))
+            db.commit()
+        self.cache.write_text(json.dumps(baseline), encoding="utf-8")
+        before = {path: path.read_bytes() for path in (self.state, self.cache)}
+        self.assertEqual(inspect_thread(self.home, self.home, ORPHAN).project_links,
+                         ProjectLinks(ProjectLink.UNASSIGNED, ProjectLink.LINKED))
+        findings = {item.code: item.count for item in inspect(self.home).findings}
+        self.assertEqual(findings[Code.DESKTOP_CACHE_LINKS_WITHOUT_SQLITE], 1)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+        mapping = "app-server-project-id-by-legacy-project-id-by-host"
+        for invalid in (
+            {**baseline, "projectless-thread-ids": [ORPHAN]},
+            {**baseline, registry: {"legacy": baseline[registry]["legacy"]}},
+            {**baseline, mapping: {"local": {"legacy": CORE, "second": INDEX_ONLY}}},
+            {**baseline, mapping: {f"local:{self.base / 'other-profile'}": baseline[mapping]["local"]}},
+        ):
+            with self.subTest(cache_only_candidate=invalid.keys()):
+                self.cache.write_text(json.dumps(invalid), encoding="utf-8")
+                findings = {item.code for item in inspect(self.home).findings}
+                self.assertNotIn(Code.DESKTOP_CACHE_LINKS_WITHOUT_SQLITE, findings)
+
+    def test_reports_stored_links_without_registry_without_guessing_membership(self):
+        data = {
+            "local-projects": {},
+            "thread-project-assignments": {THREAD: {"projectKind": "local", "projectId": "legacy"}},
+            "app-server-project-id-by-legacy-project-id-by-host": {"local": {"legacy": CORE}},
+        }
+        database = self.state.read_bytes()
+        for fields, count in (
+            ({}, 1),
+            ({"projectless-thread-ids": [THREAD]}, 0),
+            ({"app-server-project-id-by-legacy-project-id-by-host": {"local": {"legacy": ORPHAN}}}, 0),
+            ({"thread-project-assignments": {ORPHAN: "legacy"}}, 0),
+            ({"local-projects": {"legacy": None}}, 0),
+        ):
+            with self.subTest(fields=fields):
+                self.cache.write_text(json.dumps(data | fields), encoding="utf-8")
+                original = self.cache.read_bytes()
+                results = {item.code: item.count for item in inspect(self.home).findings}
+                self.assertEqual(results.get(Code.DESKTOP_CACHE_LINKS_WITHOUT_REGISTRY, 0), count)
+                self.assertEqual(self.cache.read_bytes(), original)
+                self.assertEqual(self.state.read_bytes(), database)
+
+    def test_scoped_registry_assessment_keeps_current_links_and_rejects_conflicts(self):
+        from copy import deepcopy
+        from ai_repair_kit.tools.desktop_compatibility import ACCOUNT_STATE, MIGRATION
+        from ai_repair_kit.tools.desktop_history import ASSIGNMENTS, HOST_MAP, ORDER, PROJECTLESS, REGISTRY
+
+        past, current, history = self.scoped_fixture()
+        alias, = history[REGISTRY]
+        self.installed_desktop_version.reset_mock()
+        assessment = repair.assess(self.home, self.home, past)
+        self.assertEqual((assessment.operation, assessment.projects, assessment.links, assessment.fields),
+                         (repair.Operation.SCOPED_REGISTRY, 1, 0, (REGISTRY,)))
+        self.installed_desktop_version.assert_not_called()
+        with closing(sqlite3.connect(self.state)) as db:
+            result, count = repair.scoped_registry_candidate(db, self.home, current, history)
+        self.assertEqual((result, count), ({**current, REGISTRY: history[REGISTRY]}, 1))
+        for conflict in (
+            {ACCOUNT_STATE: {"owner": "another-owner", "inactive": {}}},
+            {ACCOUNT_STATE: {"owner": "fixture-active-owner", "inactive": {"other": {}}}},
+            {ASSIGNMENTS: {}}, {PROJECTLESS: [THREAD]}, {ORDER: [alias, alias]},
+            {HOST_MAP: {f"local:{self.base}": {alias: CORE}}},
+            {REGISTRY: {alias: {**history[REGISTRY][alias], "name": "different"}}},
+        ):
+            with self.subTest(conflict=conflict):
+                variant = deepcopy(current) | conflict
+                self.cache.write_text(json.dumps(variant), encoding="utf-8")
+                before = self.cache.read_bytes()
+                self.assertNotEqual(repair.assess(self.home, self.home, past).outcome, "desktop_candidate")
+                self.assertEqual(self.cache.read_bytes(), before)
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        for bad in (True, 121, -1):
+            with self.subTest(invalid_desktop_timestamp=bad):
+                invalid = deepcopy(history)
+                invalid[REGISTRY][alias]["createdAt"] = bad
+                past.write_text(json.dumps(invalid), encoding="utf-8")
+                self.assertNotEqual(repair.assess(self.home, self.home, past).outcome, "desktop_candidate")
+        self.assertFalse(self.store.exists())
+
+    def test_scoped_missing_link_evidence_requires_explicit_sqlite_membership(self):
+        from ai_repair_kit.tools.desktop_history import ASSIGNMENTS, PROJECTLESS, REGISTRY
+
+        past, current, history = self.scoped_fixture()
+        current[REGISTRY] = history[REGISTRY]
+        current[ASSIGNMENTS] = {}
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        original_cache, original_snapshot = self.cache.read_bytes(), past.read_bytes()
+        result = repair.assess(self.home, self.home, past)
+        self.assertEqual((result.outcome, result.operation, result.links, result.skipped),
+                         ("desktop_link_evidence", repair.Operation.SCOPED_CHAT_LINKS, 0, 1))
+
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("UPDATE threads SET project_id = ? WHERE id = ?", (CORE, THREAD))
+            db.commit()
+        database = self.state.read_bytes()
+        result = repair.assess(self.home, self.home, past)
+        self.assertEqual((result.outcome, result.links, result.skipped), ("desktop_link_evidence", 1, 0))
+        version = "99.1234.5678.0"
+        self.installed_desktop_version.return_value = version
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+            with self.assertRaisesRegex(RepairError, "^desktop_snapshot_conflict$"):
+                repair.prepare(self.home, self.home, version, past)
+        self.assertEqual(self.cache.read_bytes(), original_cache)
+        self.assertEqual(past.read_bytes(), original_snapshot)
+        self.assertEqual(self.state.read_bytes(), database)
+        self.assertFalse(self.store.exists())
+
+        past.write_text(json.dumps({**history, PROJECTLESS: [THREAD]}), encoding="utf-8")
+        self.cache.write_text(json.dumps({**current, PROJECTLESS: [THREAD]}), encoding="utf-8")
+        self.assertEqual(repair.assess(self.home, self.home, past).outcome, "desktop_snapshot_conflict")
 
     def test_reports_local_migration_and_shared_roots_without_relinking(self):
         with closing(sqlite3.connect(self.state)) as db:
@@ -876,6 +1184,242 @@ class DesktopWrites(DesktopFixture):
         self.assertEqual(self.cache.read_bytes(), original)
         self.assertEqual(self.state.read_bytes(), database)
 
+    def test_compatible_timestamp_repair_accepts_future_registered_version_and_rolls_back(self):
+        original = self.timestamp_cache()
+        database = self.state.read_bytes()
+        version = "99.1234.5678.0"
+        self.installed_desktop_version.return_value = version
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+            plan = repair.prepare(self.home, self.home, version)
+            self.assertTrue(plan.compatible_timestamps)
+            self.assertEqual((plan.count, plan.linked, plan.skipped), (1, 0, 0))
+            with self.assertRaisesRegex(RepairError, "^approval_required$"):
+                repair.apply(plan, self.store, approved=False)
+            self.assertEqual(self.cache.read_bytes(), original)
+            self.assertFalse(self.store.exists())
+
+            self.installed_desktop_version.reset_mock()
+            backup = repair.apply(plan, self.store, approved=True)
+            self.assertEqual(self.installed_desktop_version.call_count, 2)
+            expected = json.loads(original)
+            expected["local-projects"]["legacy"].update(createdAt=10, updatedAt=20)
+            self.assertEqual(json.loads(self.cache.read_bytes()), expected)
+            self.assertEqual(repair._read_backup(self.store / "desktop", backup)[1], original)
+            with self.assertRaisesRegex(RepairError, "^stale$"):
+                repair.apply(plan, self.store, approved=True)
+            repair.restore(repair.prepare_restore(self.home, self.store, backup), self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertEqual(self.state.read_bytes(), database)
+
+    def test_scoped_registry_uses_verified_snapshot_for_new_signed_versions(self):
+        past, current, history = self.scoped_fixture()
+        original = self.cache.read_bytes()
+        database = self.state.read_bytes()
+        for version in ("26.1103.4239.0", "99.1234.5678.0"):
+            with self.subTest(version=version), patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+                self.installed_desktop_version.return_value = version
+                plan = repair.prepare(self.home, self.home, version, past)
+                self.assertTrue(plan.scoped_registry)
+                self.assertEqual((plan.count, plan.linked), (1, 0))
+                with self.assertRaisesRegex(RepairError, "^approval_required$"):
+                    repair.apply(plan, self.store, approved=False)
+                self.assertEqual(self.cache.read_bytes(), original)
+
+                with patch.object(repair, "ensure_closed", side_effect=RepairError("desktop_busy")):
+                    with self.assertRaisesRegex(RepairError, "^desktop_busy$"):
+                        repair.apply(plan, self.store, approved=True)
+                expected_history = past.read_bytes()
+                past.write_bytes(expected_history + b" ")
+                with self.assertRaisesRegex(RepairError, "^stale$"):
+                    repair.apply(plan, self.store, approved=True)
+                past.write_bytes(expected_history)
+                backup = repair.apply(plan, self.store, approved=True)
+                self.assertEqual(json.loads(self.cache.read_bytes()),
+                                 {**current, "local-projects": history["local-projects"]})
+                self.assertEqual(repair._read_backup(self.store / "desktop", backup)[1], original)
+                self.assertEqual(past.read_bytes(), expected_history)
+                self.assertEqual(self.state.read_bytes(), database)
+                with self.assertRaisesRegex(RepairError, "^stale$"):
+                    repair.apply(plan, self.store, approved=True)
+                rollback = repair.prepare_restore(self.home, self.store, backup)
+                repair.restore(rollback, self.store, approved=True)
+                self.assertEqual(self.cache.read_bytes(), original)
+                self.assertEqual(self.state.read_bytes(), database)
+
+    def test_scoped_partial_registry_preserves_existing_entry_and_refuses_missing_link(self):
+        from copy import deepcopy
+        from ai_repair_kit.tools.desktop_compatibility import MIGRATION
+        from ai_repair_kit.tools.desktop_history import ASSIGNMENTS, HOST_MAP, ORDER, REGISTRY
+
+        past, current, history = self.scoped_fixture()
+        second_alias = str(UUID(int=601))
+        second_root = self.base / "second-scoped-project"
+        second_root.mkdir()
+        with closing(sqlite3.connect(self.state)) as db:
+            db.execute("INSERT INTO projects VALUES (?, 'Second fixture', 1, 10, 20)", (FILE_ONLY,))
+            db.execute("INSERT INTO project_roots VALUES (?, 0, ?)", (FILE_ONLY, str(second_root)))
+            db.execute("INSERT INTO project_idempotency_keys VALUES (?, ?)", (second_alias, FILE_ONLY))
+            db.execute("INSERT INTO threads VALUES (?, NULL, ?, NULL)", (ORPHAN, str(second_root)))
+            db.commit()
+        scope = f"local:{self.home}"
+        second = {"id": second_alias, "name": "Second fixture", "rootPaths": [str(second_root)],
+                  "createdAt": 110, "updatedAt": 125}
+        history[REGISTRY][second_alias] = second
+        history[HOST_MAP][scope][second_alias] = FILE_ONLY
+        history[ORDER].insert(0, second_alias)
+        history[ASSIGNMENTS][ORPHAN] = {"projectKind": "local", "projectId": second_alias}
+        history[MIGRATION][scope]["pendingThreadAssignmentIds"].append(ORPHAN)
+        current[REGISTRY] = {second_alias: second}
+        past.write_text(json.dumps(history), encoding="utf-8")
+        self.cache.write_text(json.dumps(current), encoding="utf-8")
+        before, database = self.cache.read_bytes(), self.state.read_bytes()
+        version = "99.1234.5678.0"
+        self.installed_desktop_version.return_value = version
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+            for field in (ASSIGNMENTS, MIGRATION):
+                with self.subTest(conflicting_field=field):
+                    conflict = deepcopy(current)
+                    if field == ASSIGNMENTS:
+                        conflict[ASSIGNMENTS].pop(THREAD)
+                    else:
+                        conflict[MIGRATION][scope]["projectsMigrated"] = False
+                    self.cache.write_text(json.dumps(conflict), encoding="utf-8")
+                    with self.assertRaisesRegex(RepairError, "^desktop_snapshot_conflict$"):
+                        repair.prepare(self.home, self.home, version, past)
+                    self.assertFalse(self.store.exists())
+            self.cache.write_bytes(before)
+            plan = repair.prepare(self.home, self.home, version, past)
+            self.assertEqual((plan.count, plan.linked), (1, 0))
+            backup = repair.apply(plan, self.store, approved=True)
+            self.assertEqual(json.loads(self.cache.read_bytes()), {**current, REGISTRY: history[REGISTRY]})
+            self.assertEqual(repair._read_backup(self.store / "desktop", backup)[1], before)
+        self.assertEqual(self.state.read_bytes(), database)
+
+    def test_scoped_registry_preview_is_localized_and_cancellation_preserves_cache(self):
+        from PySide6.QtCore import QSettings, QTimer
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from ai_repair_kit.gui import codex_workflow
+        from ai_repair_kit.gui.window import MainWindow
+
+        from ai_repair_kit.tools.desktop_history import ASSIGNMENTS, REGISTRY
+
+        past, current, history = self.scoped_fixture()
+        original = self.cache.read_bytes()
+        self.installed_desktop_version.return_value = "99.1234.5678.0"
+        app = QApplication.instance() or QApplication([])
+        prefs = QSettings(str(self.base / "scoped-ui.ini"), QSettings.Format.IniFormat)
+        prefs.setValue("language", "en")
+        window = MainWindow(app, prefs, self.store)
+        self.addCleanup(window.close)
+        self.addCleanup(app.removeTranslator, window.translations.translator)
+        window.show()
+        window.nav.setCurrentRow(1)
+        flow = window.workflow
+        previews = []
+
+        def cancel():
+            dialog = QApplication.activeModalWidget()
+            if isinstance(dialog, QMessageBox):
+                previews.append(dialog.text())
+                dialog.defaultButton().click()
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}), patch.object(
+            codex_workflow.QFileDialog, "getOpenFileName", return_value=(str(past), "")
+        ):
+            flow.path.setText(str(self.home))
+            flow.start_scan()
+            flow.future.result(timeout=20)
+            flow.finish_scan()
+            self.assertTrue(flow.desktop_history.isVisible())
+            from ai_repair_kit.tools.codex_diagnostics import Finding
+            original_report = flow.report
+            flow.report = replace(original_report, findings=tuple(
+                item for item in original_report.findings if item.code != Code.DESKTOP_CACHE_EMPTY
+            ) + (Finding(Code.DB_WAL_DIAGNOSTIC), Finding(Code.DESKTOP_CACHE_INCOMPLETE)))
+            flow.render()
+            self.assertTrue(flow.desktop_history.isVisible())
+            flow.report = original_report
+            flow.render()
+            for lang, expected in ((1, "Only local-projects will change"),
+                                   (2, "local-projects만 변경합니다")):
+                with self.subTest(language=lang):
+                    window.language.setCurrentIndex(lang)
+                    QTimer.singleShot(0, cancel)
+                    flow.desktop_history.click()
+                    self.assertIn(expected, previews[-1])
+        self.assertEqual(len(previews), 2)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertFalse(self.store.exists())
+
+        self.cache.write_text(json.dumps({**current, REGISTRY: history[REGISTRY], ASSIGNMENTS: {}}),
+                              encoding="utf-8")
+        before_check = self.cache.read_bytes()
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}), patch.object(
+            codex_workflow.QFileDialog, "getOpenFileName", return_value=(str(past), "")
+        ), patch.object(flow, "confirm_change") as confirm:
+            flow.start_scan()
+            flow.future.result(timeout=20)
+            flow.finish_scan()
+            self.assertTrue(flow.desktop_history.isVisible())
+            for lang, expected in ((1, "SQLite does not confirm membership"),
+                                   (2, "SQLite로 소속을 확인할 수 없습니다")):
+                with self.subTest(language=lang):
+                    window.language.setCurrentIndex(lang)
+                    flow.desktop_history.click()
+                    self.assertIn(expected, flow.results.text())
+                    self.assertEqual(flow.message, "")
+            confirm.assert_not_called()
+        self.assertEqual(self.cache.read_bytes(), before_check)
+        self.assertFalse(self.store.exists())
+
+    def test_known_build_refuses_account_and_profile_scoped_cache(self):
+        plan = self.plan()
+        for fields in ({"electron-account-renderer-state-v1": {}}, {
+            "app-server-projects-migration-by-host": {"local:another": {}},
+        }):
+            with self.subTest(fields=fields):
+                source = json.dumps(json.loads(self.original) | fields).encode("ascii")
+                self.cache.write_bytes(source)
+                with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                    self.plan()
+                with self.assertRaisesRegex(RepairError, "^stale$"):
+                    repair.apply(plan, self.store, approved=True)
+                self.assertEqual(self.cache.read_bytes(), source)
+        self.assertFalse(self.store.exists())
+
+    def test_compatible_timestamp_repair_refuses_other_scope_wal_and_version_changes(self):
+        original = self.timestamp_cache()
+        version = "99.1234.5678.0"
+        self.installed_desktop_version.return_value = version
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+            for conflict in (
+                {"electron-account-renderer-state-v1": {}},
+                {"app-server-project-id-by-legacy-project-id-by-host": {"local": {"legacy": THREAD}}},
+                {"project-order": ["unknown"]},
+            ):
+                with self.subTest(conflict=conflict):
+                    invalid = json.dumps(json.loads(original) | conflict).encode("ascii")
+                    self.cache.write_bytes(invalid)
+                    with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                        repair.prepare(self.home, self.home, version)
+                    self.assertEqual(self.cache.read_bytes(), invalid)
+            self.cache.write_bytes(original)
+            wal = self.state.with_name(self.state.name + "-wal")
+            wal.touch()
+            with self.assertRaisesRegex(RepairError, "^desktop_ineligible$"):
+                repair.prepare(self.home, self.home, version)
+            wal.unlink()
+            plan = repair.prepare(self.home, self.home, version)
+            with patch.dict(os.environ, {"CODEX_SQLITE_HOME": str(self.base)}):
+                with self.assertRaisesRegex(RepairError, "^desktop_profile_mismatch$"):
+                    repair.apply(plan, self.store, approved=True)
+            self.installed_desktop_version.return_value = "99.1234.5679.0"
+            with self.assertRaisesRegex(RepairError, "^desktop_version_unverified$"):
+                repair.apply(plan, self.store, approved=True)
+        self.assertEqual(self.cache.read_bytes(), original)
+        self.assertFalse(self.store.exists())
+
     def test_timestamp_repair_refuses_conflicting_or_incomplete_evidence(self):
         original = json.loads(self.timestamp_cache())
         variants = [
@@ -1249,6 +1793,8 @@ class DesktopWrites(DesktopFixture):
         flow.future.result(timeout=20)
         flow.finish_scan()
         self.assertTrue(flow.desktop_history.isVisible())
+        self.assertIn("Read-only evidence supports a candidate", flow.results.text())
+        self.assertIn("Cache fields in the candidate", flow.results.text())
         previews = []
 
         def cancel():
@@ -1257,15 +1803,13 @@ class DesktopWrites(DesktopFixture):
                 previews.append(dialog.text())
                 dialog.defaultButton().click()
 
-        with patch.object(
-            codex_workflow.QInputDialog, "getText", return_value=(repair.HISTORY_BUILD, True)
-        ) as version_prompt, patch.object(
+        with patch.object(codex_workflow.QInputDialog, "getText") as version_prompt, patch.object(
             codex_workflow.QFileDialog, "getOpenFileName", return_value=(str(snapshot), "")
         ) as picker:
             QTimer.singleShot(0, cancel)
             flow.desktop_history.click()
-        self.assertIn("Windows package (MSIX) version", version_prompt.call_args.args[2])
-        self.assertIn(repair.HISTORY_BUILD, version_prompt.call_args.args[2])
+        version_prompt.assert_not_called()
+        self.assertTrue(self.installed_desktop_version.called)
         self.assertIn("Historical chat links to add: 1", previews[-1])
         self.assertIn("Historical links left untouched: 1", previews[-1])
         self.assertEqual(picker.call_args.args[3], f"Desktop cache snapshots ({repair.CACHE_NAME} {repair.CACHE_NAME}.bak {repair.CACHE_NAME}.tmp-*)")
@@ -1279,6 +1823,14 @@ class DesktopWrites(DesktopFixture):
             window.language.setCurrentIndex(2)
             window.theme.setCurrentIndex(1)
             self.assertEqual(flow.message_text(), "문제가 발생하기 전의 .codex-global-state.json, .bak 또는 .tmp-* 스냅샷을 선택하세요.")
+        self.installed_desktop_version.return_value = "99.1234.5678.0"
+        with patch.object(codex_workflow.QFileDialog, "getOpenFileName",
+                          return_value=(str(snapshot), "")):
+            flow.desktop_history.click()
+        self.assertEqual(flow.compatibility.outcome, "desktop_candidate")
+        self.assertEqual((flow.compatibility.links, flow.compatibility.skipped), (1, 1))
+        self.assertIn("검증된 쓰기 규칙이 없습니다", flow.message_text())
+        self.assertIn("읽기 전용 검사", flow.results.text())
         self.assertEqual(self.cache.read_bytes(), self.original)
         self.assertFalse(self.store.exists())
 
@@ -1660,11 +2212,18 @@ class DesktopWrites(DesktopFixture):
     def test_later_edit_blocks_manual_rollback(self):
         key = repair.apply(self.plan(), self.store, approved=True)
         rollback = repair.prepare_restore(self.home, self.store, key)
-        changed = self.cache.read_bytes() + b" "
+        repaired = self.cache.read_bytes()
+        changed = json.dumps(json.loads(repaired), ensure_ascii=False, indent=2,
+                             sort_keys=True).encode("utf-8")
+        self.assertNotEqual(changed, repaired)
+        self.assertEqual(json.loads(changed), json.loads(repaired))
         self.cache.write_bytes(changed)
-        with self.assertRaisesRegex(RepairError, "stale"):
+        with self.assertRaisesRegex(RepairError, "^stale$"):
+            repair.prepare_restore(self.home, self.store, key)
+        with self.assertRaisesRegex(RepairError, "^stale$"):
             repair.restore(rollback, self.store, approved=True)
         self.assertEqual(self.cache.read_bytes(), changed)
+        self.assertEqual(repair._read_backup(self.store / "desktop", key)[1], self.original)
 
 
 @unittest.skipUnless(os.name == "nt", "Process snapshots use Windows APIs")

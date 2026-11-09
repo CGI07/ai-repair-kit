@@ -36,8 +36,8 @@ def isolation_issues(lines: Iterable[str], vm_id: UUID) -> list[str]:
         for key, value in expected.items()
         if values[key] != [f'"{value}"']
     ]
-    if values["vmstate"] not in (['"poweroff"'], ['"running"']):
-        issues.append("VM is neither powered off nor running")
+    if values["vmstate"] not in (['"poweroff"'], ['"running"'], ['"saved"']):
+        issues.append("VM is not powered off, running, or saved")
     if any(key.startswith("sharedfolder") for key in values):
         issues.append("A host share is present")
     if any(re.fullmatch(r"(nic|uart|lpt)\d+", key) and key not in expected for key in values):

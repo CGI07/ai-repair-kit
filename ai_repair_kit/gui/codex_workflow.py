@@ -18,6 +18,15 @@ from ..tools.desktop_thread import (
 )
 
 
+def _scan_profile(home: Path, override: Path | None) -> tuple[Report, desktop_repair.Assessment | None]:
+    report = codex_diagnostics.inspect(home, override, check_desktop_version=True)
+    if report.db_home is None or not any(item.code in {
+        Code.DESKTOP_PROJECTS, Code.DESKTOP_SCHEMA, Code.DESKTOP_CACHE_UNAVAILABLE,
+    } for item in report.findings):
+        return report, None
+    return report, desktop_repair.assess(home, report.db_home, sqlite_override=override)
+
+
 class CodexWorkflow(QObject):
     def __init__(
         self, parent: QWidget, diagnostics: QVBoxLayout, backups: QVBoxLayout,
@@ -34,11 +43,12 @@ class CodexWorkflow(QObject):
         self.locations: codex.Locations | None = None
         self.report: Report | None = None
         self.last_scan: Report | None = None
+        self.compatibility: desktop_repair.Assessment | None = None
         self.message = ""
         self.backup_count: int | None = None
         self.backup_error = False
         self.show_backup_outcome = False
-        self.future: Future[Report] | Future[ThreadReport] | None = None
+        self.future: Future[tuple[Report, desktop_repair.Assessment | None] | ThreadReport] | None = None
         self.thread_report: ThreadReport | None = None
         self.invalid_thread = False
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -116,6 +126,7 @@ class CodexWorkflow(QObject):
         self.invalid_thread = False
         self.report = None
         self.last_scan = None
+        self.compatibility = None
         self.message = ""
         self.show_backup_outcome = False
         self.backup_count = None
@@ -135,9 +146,8 @@ class CodexWorkflow(QObject):
         self.invalid_thread = False
         self.message = "waiting"
         self.show_backup_outcome = False
-        self.future = self.executor.submit(
-            codex_diagnostics.inspect, home, override, check_desktop_version=True,
-        )
+        self.compatibility = None
+        self.future = self.executor.submit(_scan_profile, home, override)
         self.timer.start()
         self.render()
 
@@ -168,7 +178,8 @@ class CodexWorkflow(QObject):
             if isinstance(result, ThreadReport):
                 self.thread_report = result
             else:
-                self.report = self.last_scan = result
+                self.report, self.compatibility = result
+                self.last_scan = self.report
             self.message = ""
         except ThreadLocationChanged:
             self.report = None
@@ -232,17 +243,7 @@ class CodexWorkflow(QObject):
             else:
                 if not self.report or not self.report.db_home:
                     return
-                builds = " / ".join(desktop_repair.HISTORY_BUILDS if historical else desktop_repair.REGISTRY_BUILDS)
-                version, entered = QInputDialog.getText(
-                    self.window,
-                    self.tr("Installed Codex Desktop package version"),
-                    self.tr("Enter the installed Windows package (MSIX) version. This recovery rule supports %1.").replace("%1", builds),
-                )
-                if not entered:
-                    return
-                version = version.strip()
-                if self.report.desktop_version and self.report.desktop_version != version:
-                    raise codex_repair.RepairError("desktop_version_unverified")
+                report = self.report
                 history = None
                 if historical:
                     patterns = " ".join(desktop_repair.HISTORY_FILENAMES)
@@ -254,15 +255,31 @@ class CodexWorkflow(QObject):
                     if not path:
                         return
                     history = Path(path)
-                plan = desktop_repair.prepare(
-                    home, self.report.db_home, version, history,
-                    sqlite_override=self.report.sqlite_override,
-                )
-                if plan.build == desktop_repair.PARTIAL_REGISTRY_BUILD:
+                version = report.desktop_version or desktop_repair.installed_desktop_version()
+                try:
+                    if not version:
+                        raise codex_repair.RepairError("desktop_version_unverified")
+                    plan = desktop_repair.prepare(home, report.db_home, version, history,
+                                                  sqlite_override=report.sqlite_override)
+                except codex_repair.RepairError as error:
+                    if history is not None and str(error) in (
+                        "desktop_version", "desktop_version_unverified", "desktop_snapshot_conflict",
+                    ):
+                        self.compatibility = desktop_repair.assess(
+                            home, report.db_home, history, sqlite_override=report.sqlite_override,
+                        )
+                        if self.compatibility.outcome == "desktop_link_evidence":
+                            self.message = ""
+                            self.render()
+                            return
+                    raise
+                if plan.scoped_registry:
+                    preview = self.tr("Target: %1\nMissing project registrations to restore: %2\nThe same account, local profile, and original project IDs were verified. Existing chat links, project order, and migration markers will be preserved. Only local-projects will change after a verified backup. Check the projects and their chats after restarting Codex.")
+                elif plan.build == desktop_repair.PARTIAL_REGISTRY_BUILD:
                     preview = self.tr("Target: %1\nMissing project registrations to restore: %2\nExisting project entries and order will be preserved. The full cache will be backed up and verified first. Check the project list after restarting Codex. This rule has been tested with synthetic profiles.")
                 elif plan.build == desktop_repair.OBJECT_LINK_BUILD:
                     preview = self.tr("Target: %1\nProject registrations to restore: %2\nChat links confirmed by both the snapshot and SQLite: %3\nHistorical links left untouched: %4\nThe full cache will be backed up and verified first. Check the projects and an old chat after restarting Codex. This rule has been tested with synthetic profiles.")
-                elif plan.build == desktop_repair.TIMESTAMP_BUILD:
+                elif plan.compatible_timestamps or plan.build == desktop_repair.TIMESTAMP_BUILD:
                     preview = self.tr("Target: %1\nProjects with missing timestamps to update: %2\nOnly missing createdAt and updatedAt fields will be filled from matching SQLite records. Chat links and existing fields will be preserved. The full cache will be backed up and verified first. Check Codex after restart.")
                 else:
                     preview = self.tr("Target: %1\nProjects to add: %2\nHistorical chat links to add: %3\nHistorical links left untouched: %4\nOnly the Desktop cache will change. The full cache will be backed up and verified first. Check Codex after restart.")
@@ -368,7 +385,13 @@ class CodexWorkflow(QObject):
             Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_CACHE_INCOMPLETE, Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING,
         }))
         pending_empty_cache = {Code.DESKTOP_CACHE_EMPTY, Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING} <= codes
-        self.desktop_history.setVisible(Code.DESKTOP_PROJECTS in codes and (can_preview or pending_empty_cache))
+        scoped_snapshot_check = Code.DESKTOP_PROFILE_QUALIFIED_MIGRATION in codes and bool(codes & {
+            Code.DESKTOP_CACHE_INCOMPLETE, Code.DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE,
+            Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING,
+        })
+        self.desktop_history.setVisible(
+            Code.DESKTOP_PROJECTS in codes and (can_preview or pending_empty_cache or scoped_snapshot_check)
+        )
         self.desktop_repair.setEnabled(idle)
         self.desktop_history.setEnabled(idle)
         can_check_thread = bool(self.report and self.report.db_home)
@@ -407,9 +430,15 @@ class CodexWorkflow(QObject):
         if self.report and not self.message:
             result = "\n".join(self.finding_text(item) for item in self.report.findings)
             result = result or self.tr("No issues found in the checks that ran.")
+            if self.compatibility:
+                result += "\n" + self.compatibility_text(self.compatibility)
             if self.report.desktop_version:
                 version = self.tr("Installed Codex Desktop MSIX: %1").replace("%1", self.report.desktop_version)
                 result = version + "\n" + result
+        elif self.report and self.compatibility and self.message in (
+            "desktop_version", "desktop_version_unverified", "desktop_snapshot_conflict",
+        ):
+            result += "\n" + self.compatibility_text(self.compatibility)
         self.results.setText(result)
         self.results.setVisible(bool(result))
 
@@ -424,6 +453,36 @@ class CodexWorkflow(QObject):
             status = "\n".join(part for part in (self.message_text(), status) if part)
         self.backup_status.setText(status)
         self.backup_status.setVisible(bool(status))
+
+    def compatibility_text(self, check: desktop_repair.Assessment) -> str:
+        if check.outcome == "desktop_candidate":
+            details = [self.tr(
+                "Read-only evidence supports a candidate for %1 projects and %2 chat links. "
+                "A separate write-safety check is required."
+            ).replace("%1", str(check.projects)).replace("%2", str(check.links))]
+            if check.skipped:
+                details.append(self.tr("Historical links excluded for insufficient or conflicting evidence: %1")
+                               .replace("%1", str(check.skipped)))
+            if check.fields:
+                details.append(self.tr("Cache fields in the candidate: %1").replace("%1", ", ".join(check.fields)))
+            return "\n".join(details)
+        if check.outcome == "desktop_link_evidence":
+            return self.tr(
+                "Read-only chat link check. The backup and SQLite agree on %1 missing links. "
+                "For %2 links, SQLite does not confirm membership. This check does not change assignments."
+            ).replace("%1", str(check.links)).replace("%2", str(check.skipped))
+        if check.outcome == "desktop_no_changes":
+            return self.tr("The project registry matches the verified catalog. No registry repair is needed.")
+        if check.outcome == "desktop_format":
+            return self.tr("This cache layout is outside the verified repair format. "
+                           "Account or profile scoped data and unknown chat links need separate evidence.")
+        if check.outcome == "desktop_schema":
+            return self.tr("The project database uses an unrecognized table or key layout. Other diagnostics can still run.")
+        if check.outcome in ("desktop_safety", "desktop_profile_mismatch"):
+            return self.tr("The compatibility check could not safely read the selected files or verify the profile.")
+        return self.tr("There is insufficient evidence for a project cache repair. "
+                       "An intact pre-incident snapshot may provide more evidence.")
+
 
     def thread_report_text(self) -> str:
         if self.invalid_thread:
@@ -521,7 +580,7 @@ class CodexWorkflow(QObject):
             "waiting": self.tr("Checking local metadata…"),
             "desktop_repaired": self.tr("Desktop cache written and verified. Restart Codex and confirm the project list and an old chat in the app."),
             "desktop_restored": self.tr("Original Desktop cache restored and verified."),
-            "desktop_version": self.tr("This Desktop version is not supported by the selected recovery rule."),
+            "desktop_version": self.tr("No verified write rule is available for this installation and cache format. You can still review the diagnostic results."),
             "desktop_version_unverified": self.tr("The registered x64 Codex MSIX could not be verified as the selected version. Check the installed package and run diagnostics again."),
             "desktop_profile_mismatch": self.tr("The SQLite database and Desktop cache resolve to different folders. Confirm the original profile before trying this repair."),
             "desktop_snapshot_conflict": self.tr("The selected snapshot disagrees with the current project IDs, names, roots, or local mapping. Keep both copies for review."),
@@ -555,7 +614,7 @@ class CodexWorkflow(QObject):
             Code.DB_OTHER_VERSION: self.tr("A different SQLite state file version was found. Its schema was not inspected."),
             Code.DB_UNAVAILABLE: self.tr("SQLite state could not be checked safely."),
             Code.DB_SIDECARS: self.tr("SQLite journal or WAL files are present. The state check was skipped."),
-            Code.DB_WAL_DIAGNOSTIC: self.tr("State metadata was read with the SQLite WAL. Cache recovery with a WAL is limited to the supported historical migration case."),
+            Code.DB_WAL_DIAGNOSTIC: self.tr("State metadata was read with the SQLite WAL. Cache recovery with a WAL requires an eligible historical snapshot and a verified database snapshot."),
             Code.DB_DAMAGED: self.tr("SQLite reported a damaged or invalid state database. Automatic repair is unavailable."),
             Code.DB_SCHEMA: self.tr("The SQLite thread schema is unsupported."),
             Code.ROW_LIMIT: self.tr("Only the first %1 SQLite thread references were checked."),
@@ -578,8 +637,10 @@ class CodexWorkflow(QObject):
             Code.DESKTOP_LEGACY_IDENTITY_AMBIGUOUS: self.tr("SQLite projects with multiple possible original Desktop IDs: %1. Preserve the mappings for review."),
             Code.DESKTOP_CACHE_OBJECT_LINKS: self.tr("Recognized local cache chat links stored as objects: %1."),
             Code.DESKTOP_CACHE_STALE_LINKS: self.tr("Local cache chat links whose project entry or thread is missing: %1. Preserve the original cache and database."),
+            Code.DESKTOP_CACHE_LINKS_WITHOUT_REGISTRY: self.tr("Stored chat links with a matching SQLite project and missing Desktop registration: %1. Preserve these links."),
             Code.DESKTOP_CACHE_LINK_CONFLICTS: self.tr("Chat links conflicting with SQLite or an explicit projectless choice: %1. Review the original evidence before relinking."),
             Code.DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE: self.tr("SQLite chat links with no cache assignment: %1. This identifies a metadata mismatch. Check whether the original chat opens under its project in Codex."),
+            Code.DESKTOP_CACHE_LINKS_WITHOUT_SQLITE: self.tr("The cache links %1 chats whose SQLite project link is empty. Verify grouping in Codex before changing any links."),
             Code.DESKTOP_PROJECT_TIMESTAMPS_MISSING: self.tr("Project cache entries missing timestamp fields: %1. A version-specific repair may apply."),
             Code.DESKTOP_ROOT_SHARED: self.tr("Exact project roots shared by multiple SQLite project records: %1. Review the original registrations before re-adding folders."),
             Code.DESKTOP_ASSIGNMENT_MIGRATION_PENDING: self.tr("The Desktop cache marks project migration complete and chat assignment migration incomplete. Preserve the cache for review."),

@@ -63,6 +63,8 @@ class Code(Enum):
     DESKTOP_CACHE_STALE_LINKS = "desktop_cache_stale_links"
     DESKTOP_CACHE_LINK_CONFLICTS = "desktop_cache_link_conflicts"
     DESKTOP_CANONICAL_LINKS_WITHOUT_CACHE = "desktop_canonical_links_without_cache"
+    DESKTOP_CACHE_LINKS_WITHOUT_SQLITE = "desktop_cache_links_without_sqlite"
+    DESKTOP_CACHE_LINKS_WITHOUT_REGISTRY = "desktop_cache_links_without_registry"
     DESKTOP_PROJECT_TIMESTAMPS_MISSING = "desktop_project_timestamps_missing"
     DESKTOP_ROOT_SHARED = "desktop_root_shared"
     DESKTOP_ASSIGNMENT_MIGRATION_PENDING = "desktop_assignment_migration_pending"
@@ -216,9 +218,10 @@ def _state_db(home: Path, db_home: Path, snapshots: ExitStack) -> tuple[list[Fin
             open_snapshot(db_home / STATE_NAME, allow_wal=True, allow_empty_wal=True)
         )
         db = snapshot.connection
-        if not {"id", "cwd", "rollout_path"} <= columns(db, "threads").keys():
-            return [Finding(Code.DB_SCHEMA)], None
-        findings = _db_metadata(home, db)
+        if {"id", "cwd", "rollout_path"} <= columns(db, "threads").keys():
+            findings = _db_metadata(home, db)
+        else:
+            findings = [Finding(Code.DB_SCHEMA)]
         if snapshot.uses_wal:
             findings.insert(0, Finding(Code.DB_WAL_DIAGNOSTIC))
         return findings, db

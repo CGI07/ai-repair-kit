@@ -2,12 +2,12 @@
 
 Did Codex Desktop show **No projects**, lose its project sidebar after an update, or stop showing older chats under their projects? AI Repair Kit is an independent Windows tool that checks local project registrations, chat links, and SQLite metadata to help explain what is missing.
 
-**[Download AI Repair Kit v1.0.0rc3 for Windows x64](https://github.com/CGI07/ai-repair-kit/releases/download/v1.0.0rc3/AI-Repair-Kit-1.0.0rc3-windows-x64.zip)** · [Release notes](https://github.com/CGI07/ai-repair-kit/releases/tag/v1.0.0rc3) · [SHA-256 checksums](https://github.com/CGI07/ai-repair-kit/releases/download/v1.0.0rc3/SHA256SUMS.txt)
+**[Download AI Repair Kit v1.0.0rc4 for Windows x64](https://github.com/CGI07/ai-repair-kit/releases/download/v1.0.0rc4/AI-Repair-Kit-1.0.0rc4-windows-x64.zip)** · [Release notes](https://github.com/CGI07/ai-repair-kit/releases/tag/v1.0.0rc4) · [SHA-256 checksums](https://github.com/CGI07/ai-repair-kit/releases/download/v1.0.0rc4/SHA256SUMS.txt)
 
 1. Verify the ZIP checksum, use **Extract All**, and run **AI-Repair-Kit.exe** with **_internal** beside it. Python is included. See the [Windows installation guide](docs/windows-quick-start.md) for the Microsoft runtime and unsigned EXE.
 2. Open **Diagnostics**, select the affected local Codex profile, and run a read-only scan. If a supported repair appears, close Codex and review the proposed change and backup before approving it.
 
-**Recovery limits.** This prerelease can repair specific Desktop cache entries on four documented MSIX builds when original records agree. Other builds are diagnosis-only for Desktop cache issues. Missing chat contents and Goal records can be investigated but cannot be restored by this tool. Repairs have been tested with synthetic data. Recovery in the actual Codex Desktop interface remains unverified. [Supported versions and repair conditions](docs/desktop-recovery.md)
+**Verified recovery.** The packaged Windows EXE restored two synthetic projects in Codex Desktop MSIX `26.1103.4239.0` after complete loss of the project registry. Both existing chats reopened under their original projects, including after restart. This case requires a verified pre-incident cache and intact original chat assignments. Other layouts and releases have separate evidence requirements. Missing chat contents and Goals are diagnostic only. [Repair conditions](docs/desktop-recovery.md) · [Windows 11 verification](docs/desktop-vm-verification.md#final-rc4-package-on-windows-11)
 
 ![AI Repair Kit dashboard on Windows](docs/images/dashboard.png)
 
@@ -15,20 +15,20 @@ Did Codex Desktop show **No projects**, lose its project sidebar after an update
 
 | Symptom | What AI Repair Kit can do |
 | --- | --- |
-| Projects disappeared from the Desktop sidebar | Check the local project catalog. Preview an empty-registry repair for MSIX `26.911.7940.0` when the surviving catalog provides the required IDs and roots. |
-| Projects exist in the cache but are hidden after a custom migration | For MSIX `26.903.8094.0`, preview filling only missing numeric project timestamps from matching SQLite records. |
+| Projects disappeared from the Desktop sidebar | Check the local project catalog. Preview a registry-only repair when a verified pre-incident cache and the current account, local profile, SQLite identities, and existing chat links agree. A separate legacy rule covers MSIX `26.911.7940.0`. |
+| Projects exist in the cache but are hidden after a custom migration | Preview filling only missing numeric project timestamps from matching SQLite records when the legacy cache structure and active profile pass validation. |
 | Old chats no longer appear under their projects | Use a trusted pre-incident cache snapshot to restore exact associations for MSIX `26.1013.3656.0`, or for the documented empty-cache and incomplete-migration case on `26.1029.7803.0`. |
 | A chat opens with only part of its history | Check the thread, referenced session file and, for known paginated storage, the history index file. [Interpret the results](docs/desktop-recovery.md#a-chat-opens-with-only-part-of-its-history). |
 | A chat or Goal appears missing | Check the selected thread's recorded project link, referenced rollout file, and legacy or separate Goal records. This check does not restore chat contents or Goals. |
 | The local user configuration contains only NUL bytes | Preview replacing that exact file with an empty TOML file so Codex can use defaults for the user layer. |
 
-The version-specific repairs change only the Desktop JSON cache. A matching project directory alone is insufficient evidence of chat membership. Database changes, session reconstruction, account issues and other AI tools are outside this prerelease's recovery scope. The [recovery guide](docs/desktop-recovery.md) lists the checks, evidence, and conditions for each rule.
+Desktop repairs change only the Desktop JSON cache. The timestamp and account-scoped registry rules check data structure and evidence rather than a version allowlist. A matching project directory alone is insufficient evidence of chat membership. Database changes, session reconstruction, account issues and other AI tools are outside this prerelease's recovery scope. The [recovery guide](docs/desktop-recovery.md) lists the checks, evidence, and conditions for each rule.
 
 The application has been tested on Windows 10 x64 and an offline Windows 11 x64 guest. The tests cover synthetic profiles, including metadata created by the official bundled Codex App Server. Results from independent public incident reports and the lab's own results are recorded separately. [Windows VM verification](docs/desktop-vm-verification.md)
 
-The [issue #42739 review](docs/issue-42739.md) records the 81 comments checked for this prerelease. It separates the common Desktop catalog mismatch from different profile, account and data failures. Each recovery rule applies only to its documented evidence and version. The [research roadmap](docs/research-roadmap.md) records related reports, evidence gaps and development priorities.
+The [issue #42739 review](docs/issue-42739.md) records the 81 comments checked for this prerelease. It separates the common Desktop catalog mismatch from different profile, account and data failures. Each recovery rule requires its documented evidence. Older recovery rules also require specific MSIX versions. The [research roadmap](docs/research-roadmap.md) records related reports, evidence gaps and development priorities.
 
-The [security and build verification notes](SECURITY.md) describe what the application reads, what it can write after approval, and how to check the download or build it from source. MSIX `26.915.4065.0`, `26.924.2738.0`, and `26.1103.4239.0` are diagnostic-only in rc3. For `26.1103.4239.0`, the lab verified that two synthetic projects and their chats stayed visible after an offline restart. Desktop recovery after applying a repair remains unverified on these builds.
+The [security and build verification notes](SECURITY.md) describe what the application reads, what it can write after approval, and how to check the download or build it from source. The packaged EXE verified full registry recovery, backup, and byte-exact rollback in the Windows 11 lab. After Codex reserialized the cache, the EXE refused to overwrite the changed bytes. Partial registry loss has synthetic coverage. The account-scoped chat-link check reports missing links and conflicting evidence without writing them. [Lab results and limitations](docs/desktop-vm-verification.md#final-rc4-package-on-windows-11)
 
 ### Why can the sidebar say “No projects” when the files are still there?
 

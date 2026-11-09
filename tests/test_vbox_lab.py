@@ -24,11 +24,20 @@ ISOLATED = [
 
 
 class IsolationChecks(unittest.TestCase):
-    def test_matches_the_lab_and_checks_both_supported_states(self):
-        self.assertEqual(isolation_issues(ISOLATED, VM_ID), [])
-        running = ['VMState="running"' if line.startswith("VMState") else line for line in ISOLATED]
-        self.assertEqual(isolation_issues(running, VM_ID), [])
-        self.assertTrue(isolation_issues(running, UUID(int=0)))
+    def test_matches_the_lab_in_supported_states(self):
+        for state in ("poweroff", "running", "saved"):
+            with self.subTest(state=state):
+                settings = [
+                    f'VMState="{state}"' if line.startswith("VMState") else line
+                    for line in ISOLATED
+                ]
+                self.assertEqual(isolation_issues(settings, VM_ID), [])
+                self.assertTrue(isolation_issues(settings, UUID(int=0)))
+
+    def test_refuses_transient_states_and_checks_saved_state_isolation(self):
+        settings = [line for line in ISOLATED if not line.startswith(("VMState", "nic1="))]
+        self.assertTrue(isolation_issues(settings + ['VMState="starting"', 'nic1="none"'], VM_ID))
+        self.assertTrue(isolation_issues(settings + ['VMState="saved"', 'nic1="nat"'], VM_ID))
 
     def test_refuses_attached_or_ambiguous_channels(self):
         for key, value in (

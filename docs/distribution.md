@@ -6,7 +6,7 @@ AI Repair Kit source is licensed under GPL-3.0-only. It uses PySide6 Essentials 
 
 Windows builds are unsigned. The package script includes the GPL project license, the CPython license, PyInstaller's license, Qt library notices and matching upstream source checksums. Release assets must provide the corresponding source materials for the shipped Qt libraries. The installed PySide6 Essentials and Shiboken 6.11.3 license folders alone do not provide the complete open-source notices.
 
-The rc2 release includes the Qt 6.11.3 corresponding source archives alongside the Windows ZIP. An rc3 release needs the same check against its own bundle and source revision. A successful local package is evidence for review before publication.
+The releases provide Qt 6.11.3 corresponding source archives alongside the Windows ZIP. Check each bundle against its pinned dependencies and corresponding-source materials before publishing.
 
 ## Windows prerelease packaging
 
@@ -14,7 +14,7 @@ Every public release includes a tested Windows x64 executable ZIP, checksums, En
 
 The candidate workflow can run manually or on a version tag. It uses hash-pinned Windows wheels, runs the source tests and prepares a downloadable artifact with the ZIP, SHA-256 and source revision. A build or test failure stops artifact creation. The maintainer reviews the candidate and approves publication separately. The [local build instructions](../CONTRIBUTING.md#build-the-windows-candidate) reproduce the workflow using pinned dependencies. Byte-identical ZIPs and EXEs across different runs are not guaranteed.
 
-The version-specific cache operations require an explicit preview and approval. Current recovery evidence comes from synthetic fixtures. Independent verification in Codex Desktop remains open.
+Cache operations require an explicit preview and approval. The rc4 Windows EXE was verified against the full registry loss case on an isolated Codex Desktop MSIX `26.1103.4239.0` profile with synthetic projects and chats. The tested binary and tag build may differ at the byte level. Record the release asset hash and verify its source matches the tag. [Verification scope](desktop-vm-verification.md#final-rc4-package-on-windows-11)
 
 ## Before publishing binaries
 

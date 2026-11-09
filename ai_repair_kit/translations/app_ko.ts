@@ -335,8 +335,8 @@ Restore %2 original NUL bytes from the selected backup. This restores the origin
             <translation>SQLite 상태를 안전하게 검사할 수 없습니다.</translation>
         </message>
         <message>
-            <source>State metadata was read with the SQLite WAL. Cache recovery with a WAL is limited to the supported historical migration case.</source>
-            <translation>SQLite WAL을 포함해 상태 메타데이터를 읽었습니다. WAL이 있을 때는 지원되는 이전 기록 기반 마이그레이션 사례에서만 캐시를 복구할 수 있습니다.</translation>
+            <source>State metadata was read with the SQLite WAL. Cache recovery with a WAL requires an eligible historical snapshot and a verified database snapshot.</source>
+            <translation>SQLite WAL을 포함해 상태 메타데이터를 읽었습니다. WAL이 있을 때 캐시를 복구하려면 조건을 충족하는 과거 스냅샷과 검증된 데이터베이스 스냅샷이 필요합니다.</translation>
         </message>
         <message>
             <source>SQLite journal or WAL files are present. The state check was skipped.</source>
@@ -383,14 +383,6 @@ Restore %2 original NUL bytes from the selected backup. This restores the origin
             <translation>Desktop 캐시 스냅샷</translation>
         </message>
         <message>
-            <source>Installed Codex Desktop package version</source>
-            <translation>설치된 Codex Desktop 패키지 버전</translation>
-        </message>
-        <message>
-            <source>Enter the installed Windows package (MSIX) version. This recovery rule supports %1.</source>
-            <translation>설치된 Windows 패키지(MSIX) 버전을 입력하세요. 이 복구 규칙은 %1 버전에서만 사용할 수 있습니다.</translation>
-        </message>
-        <message>
             <source>Recover Desktop projects and links</source>
             <translation>Desktop 프로젝트 및 연결 복구</translation>
         </message>
@@ -431,8 +423,8 @@ Restore %3 bytes (SHA-256: %4). The current cache will be backed up and verified
             <translation>원래 Desktop 캐시를 복원하고 검증했습니다.</translation>
         </message>
         <message>
-            <source>This Desktop version is not supported by the selected recovery rule.</source>
-            <translation>이 Desktop 버전에는 선택한 복구 규칙을 적용할 수 없습니다.</translation>
+            <source>No verified write rule is available for this installation and cache format. You can still review the diagnostic results.</source>
+            <translation>이 설치와 캐시 형식에는 검증된 쓰기 규칙이 없습니다. 진단 결과는 계속 확인할 수 있습니다.</translation>
         </message>
         <message>
             <source>The cache, schema or project evidence does not qualify for this rule. Keep your files and consult the user guide.</source>
@@ -879,6 +871,10 @@ The full cache will be backed up and verified first. Check the projects and an o
             <translation>객체 형식으로 저장된 로컬 캐시 채팅 연결: %1개.</translation>
         </message>
         <message>
+            <source>Stored chat links with a matching SQLite project and missing Desktop registration: %1. Preserve these links.</source>
+            <translation>SQLite에 해당 프로젝트가 있고 Desktop 등록만 누락된 채팅 연결: %1개. 이 연결을 보존하세요.</translation>
+        </message>
+        <message>
             <source>Local cache chat links whose project entry or thread is missing: %1. Preserve the original cache and database.</source>
             <translation>프로젝트 항목이나 스레드가 없는 로컬 캐시 채팅 연결: %1개. 원래 캐시와 데이터베이스를 보관하세요.</translation>
         </message>
@@ -889,6 +885,54 @@ The full cache will be backed up and verified first. Check the projects and an o
         <message>
             <source>SQLite chat links with no cache assignment: %1. This identifies a metadata mismatch. Check whether the original chat opens under its project in Codex.</source>
             <translation>캐시에 대응하는 항목이 없는 SQLite 채팅 연결: %1개. 메타데이터 불일치입니다. Codex에서 원래 채팅이 해당 프로젝트 아래에서 열리는지 확인하세요.</translation>
+        </message>
+        <message>
+            <source>The cache links %1 chats whose SQLite project link is empty. Verify grouping in Codex before changing any links.</source>
+            <translation>SQLite 프로젝트 연결이 비어 있지만 캐시에 연결이 남은 채팅은 %1개입니다. 연결을 변경하기 전에 Codex에서 실제 프로젝트 소속을 확인하세요.</translation>
+        </message>
+        <message>
+            <source>Read-only evidence supports a candidate for %1 projects and %2 chat links. A separate write-safety check is required.</source>
+            <translation>읽기 전용 검사에서 프로젝트 %1개와 채팅 연결 %2개의 복구 후보를 확인했습니다. 쓰기 전 별도의 안전 검사가 필요합니다.</translation>
+        </message>
+        <message>
+            <source>Historical links excluded for insufficient or conflicting evidence: %1</source>
+            <translation>근거가 부족하거나 충돌하여 제외된 과거 채팅 연결: %1개</translation>
+        </message>
+        <message>
+            <source>Cache fields in the candidate: %1</source>
+            <translation>복구 후보에서 변경될 캐시 필드: %1</translation>
+        </message>
+        <message>
+            <source>Target: %1
+Missing project registrations to restore: %2
+The same account, local profile, and original project IDs were verified. Existing chat links, project order, and migration markers will be preserved. Only local-projects will change after a verified backup. Check the projects and their chats after restarting Codex.</source>
+            <translation>대상: %1
+복원할 누락 프로젝트 등록: %2개
+동일한 계정과 로컬 프로필, 원본 프로젝트 ID를 확인했습니다. 기존 채팅 연결과 프로젝트 순서, 마이그레이션 상태를 보존합니다. 백업 검증 후 local-projects만 변경합니다. Codex를 다시 시작한 뒤 프로젝트와 채팅을 확인하세요.</translation>
+        </message>
+        <message>
+            <source>Read-only chat link check. The backup and SQLite agree on %1 missing links. For %2 links, SQLite does not confirm membership. This check does not change assignments.</source>
+            <translation>읽기 전용 채팅 연결 검사입니다. 누락된 연결 %1개는 백업과 SQLite의 소속이 일치합니다. %2개는 SQLite로 소속을 확인할 수 없습니다. 이 검사는 채팅 연결을 변경하지 않습니다.</translation>
+        </message>
+        <message>
+            <source>The project registry matches the verified catalog. No registry repair is needed.</source>
+            <translation>프로젝트 등록부가 검증된 목록과 일치합니다. 등록부 복구가 필요하지 않습니다.</translation>
+        </message>
+        <message>
+            <source>This cache layout is outside the verified repair format. Account or profile scoped data and unknown chat links need separate evidence.</source>
+            <translation>이 캐시 구조는 검증된 복구 형식 밖에 있습니다. 계정별 또는 프로필별 데이터와 확인되지 않은 채팅 연결에는 별도의 근거가 필요합니다.</translation>
+        </message>
+        <message>
+            <source>The project database uses an unrecognized table or key layout. Other diagnostics can still run.</source>
+            <translation>프로젝트 데이터베이스의 테이블 또는 키 구조를 해석할 수 없습니다. 다른 진단은 계속할 수 있습니다.</translation>
+        </message>
+        <message>
+            <source>The compatibility check could not safely read the selected files or verify the profile.</source>
+            <translation>호환성 검사에서 선택한 파일을 안전하게 읽거나 프로필을 확인할 수 없었습니다.</translation>
+        </message>
+        <message>
+            <source>There is insufficient evidence for a project cache repair. An intact pre-incident snapshot may provide more evidence.</source>
+            <translation>프로젝트 캐시를 복구할 근거가 부족합니다. 문제가 발생하기 전의 온전한 스냅샷에서 추가 근거를 확인할 수 있습니다.</translation>
         </message>
     </context>
 </TS>

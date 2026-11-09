@@ -17,16 +17,19 @@ from .codex import installed_desktop_version
 from .codex_diagnostics import inspect_config_bytes, locked_config
 from .codex_repair import RepairError, _publish_backup
 from .desktop_catalog import (
-    CACHE_LIMIT, CACHE_NAME, STATE_NAME, Unsupported, decode_cache, legacy_keys,
+    CACHE_LIMIT, CACHE_NAME, STATE_NAME, SnapshotHasSidecars, Unsupported, decode_cache, legacy_keys,
     open_snapshot, projects, read_cache,
 )
 
+from .desktop_compatibility import ACCOUNT_STATE, CacheFormatError, Operation, classify_layout, require_legacy_scope
 from .desktop_history import (
+    ASSIGNMENTS, HOST_MAP, ORDER, REGISTRY,
     HISTORY_BUILD, HISTORY_BUILDS as STRING_LINK_BUILDS, RECENT_HISTORY_BUILD,
     matches_recent_history, merge_history,
 )
 from .desktop_registry import (
     OBJECT_LINK_BUILD, PARTIAL_REGISTRY_BUILD, HistoricalEvidenceError, build_registry,
+    _require_identity_schema, scoped_assignment_evidence, scoped_registry_candidate,
 )
 
 SUPPORTED_BUILD = "26.911.7940.0"
@@ -55,6 +58,8 @@ class Plan:
     history_hash: str = ""
     config_hash: str | None = None
     sqlite_override: Path | None = None
+    compatible_timestamps: bool = False
+    scoped_registry: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,7 +138,30 @@ def _timestamp_candidate(db: sqlite3.Connection, cache: dict) -> tuple[bytes, in
     return data, count
 
 
-def _build_candidate(db: sqlite3.Connection, cache: dict, history: bytes | None, build: str):
+def _scoped_registry_bytes(db: sqlite3.Connection, home: Path, cache: dict,
+                           history: bytes | None) -> tuple[bytes, int, int, int]:
+    if history is None:
+        raise RepairError("desktop_ineligible")
+    merged, count = scoped_registry_candidate(db, home, cache, decode_cache(history))
+    result = (json.dumps(merged, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
+    if decode_cache(result) != merged:
+        raise RepairError("desktop_ineligible")
+    return result, count, 0, 0
+
+
+def _build_candidate(db: sqlite3.Connection, cache: dict, history: bytes | None, build: str,
+                     *, compatible_timestamps: bool = False):
+    require_legacy_scope(cache)
+    if compatible_timestamps:
+        if history is not None or classify_layout(cache).operation != Operation.TIMESTAMPS:
+            raise RepairError("desktop_version")
+        if ORDER in cache and set(cache[ORDER]) != cache[REGISTRY].keys():
+            raise RepairError("desktop_ineligible")
+        # Prove the original identities, existing roots and host mapping before
+        # reusing the timestamp-only transformation on this layout.
+        build_registry(db, {**cache, REGISTRY: {}, ASSIGNMENTS: {}}, None)
+        data, count = _timestamp_candidate(db, cache)
+        return data, count, 0, 0
     if build in LAB_CACHE_BUILDS:
         merged, count, linked, skipped = build_registry(
             db, cache, decode_cache(history) if history is not None else None,
@@ -144,11 +172,99 @@ def _build_candidate(db: sqlite3.Connection, cache: dict, history: bytes | None,
     else:
         if build == RECENT_HISTORY_BUILD and not matches_recent_history(cache):
             raise RepairError("desktop_ineligible")
-        merged, count, linked, skipped = merge_history(db, cache, decode_cache(history))
+        previous = decode_cache(history)
+        require_legacy_scope(previous)
+        merged, count, linked, skipped = merge_history(db, cache, previous)
     result = (json.dumps(merged, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
     if decode_cache(result) != merged:
         raise RepairError("desktop_ineligible")
     return result, count, linked, skipped
+
+
+@dataclass(frozen=True)
+class Assessment:
+    """Read-only evidence. It cannot be passed to apply()."""
+
+    outcome: str
+    operation: Operation | None = None
+    projects: int = 0
+    links: int = 0
+    skipped: int = 0
+    fields: tuple[str, ...] = ()
+
+
+def assess(home: Path, db_home: Path, history: Path | None = None, *,
+           sqlite_override: Path | None = None) -> Assessment:
+    """Check a candidate in memory without consulting or trusting a package number."""
+    try:
+        if history is not None:
+            _validate_history_path(home, history)
+        with pinned_directory(home), locked_config(home) as config:
+            _check_database(home, db_home, config, sqlite_override)
+            _, cache = read_cache(home)
+            previous = decode_cache(_read_bytes(history)) if history is not None else None
+            if previous is not None and ACCOUNT_STATE in cache:
+                if db_home != home:
+                    return Assessment("desktop_profile_mismatch", Operation.SCOPED_REGISTRY)
+                with open_snapshot(db_home / STATE_NAME, allow_wal=True, allow_empty_wal=True) as snapshot:
+                    if cache.get(ASSIGNMENTS) != previous.get(ASSIGNMENTS):
+                        links, skipped = scoped_assignment_evidence(snapshot.connection, home, cache, previous)
+                        return Assessment("desktop_link_evidence", Operation.SCOPED_CHAT_LINKS,
+                                          links=links, skipped=skipped)
+                    _, count = scoped_registry_candidate(snapshot.connection, home, cache, previous)
+                return Assessment("desktop_candidate", Operation.SCOPED_REGISTRY, count, fields=(REGISTRY,))
+            layout = classify_layout(cache, previous)
+            override = os.environ.get("CODEX_HOME")
+            if (override and Path(override) != home) or (
+                db_home != home and layout.operation in (Operation.PARTIAL_REGISTRY, Operation.OBJECT_HISTORY)
+            ):
+                return Assessment("desktop_profile_mismatch", layout.operation)
+            with open_snapshot(db_home / STATE_NAME, allow_wal=layout.allow_wal) as snapshot:
+                return _assess_candidate(snapshot.connection, cache, previous, layout.operation)
+    except CacheFormatError:
+        return Assessment("desktop_format")
+    except HistoricalEvidenceError as error:
+        return Assessment(str(error))
+    except RepairError as error:
+        return Assessment(str(error))
+    except SnapshotHasSidecars:
+        return Assessment("desktop_safety")
+    except (Unsupported, sqlite3.Error):
+        return Assessment("desktop_ineligible")
+    except (ValueError, OSError):
+        return Assessment("desktop_safety")
+
+
+def _assess_candidate(db: sqlite3.Connection, cache: dict, previous: dict | None,
+                      operation: Operation) -> Assessment:
+    try:
+        _require_identity_schema(db)
+    except (Unsupported, sqlite3.Error):
+        return Assessment("desktop_schema", operation)
+    linked = skipped = 0
+    if operation == Operation.TIMESTAMPS:
+        data, count = _timestamp_candidate(db, cache)
+        merged = decode_cache(data)
+    elif operation == Operation.STRING_HISTORY and previous is not None:
+        merged, count, linked, skipped = merge_history(db, cache, previous)
+    else:
+        if operation == Operation.PARTIAL_REGISTRY:
+            # Reconstruct only in memory. A complete, matching registry has no missing entries.
+            expected, *_ = build_registry(db, {**cache, REGISTRY: {}, ASSIGNMENTS: {}}, None)
+            entries = cache[REGISTRY]
+            if entries.keys() == expected[REGISTRY].keys() and all(
+                isinstance(entry, dict) and all(
+                    entry.get(key) == value and type(entry.get(key)) is type(value)
+                    for key, value in expected[REGISTRY][project].items()
+                ) for project, entry in entries.items()
+            ):
+                return Assessment("desktop_no_changes", operation)
+        merged, count, linked, skipped = build_registry(db, cache, previous)
+    encoded = json.dumps(merged, ensure_ascii=True, allow_nan=False).encode("ascii")
+    decode_cache(encoded)
+    fields = tuple(key for key in (REGISTRY, ORDER, HOST_MAP, ASSIGNMENTS)
+                   if key in merged and (key not in cache or merged[key] != cache[key]))
+    return Assessment("desktop_candidate", operation, count, linked, skipped, fields)
 
 
 def _check_database(home: Path, expected: Path, data: bytes | None,
@@ -180,33 +296,53 @@ def _check_installed_build(home: Path, db_home: Path, build: str) -> None:
 
 def prepare(home: Path, db_home: Path, build: str, history: Path | None = None, *,
             sqlite_override: Path | None = None) -> Plan:
-    if build not in (HISTORY_BUILDS if history else REGISTRY_BUILDS):
+    compatible_timestamps = history is None and build not in REGISTRY_BUILDS
+    if (build not in (HISTORY_BUILDS if history is not None else REGISTRY_BUILDS)
+            and not _active_local_profile(home, db_home)):
         raise RepairError("desktop_version")
     _check_installed_build(home, db_home, build)
     if history is not None:
         _validate_history_path(home, history)
     try:
         with pinned_directory(home):
-            return _prepare_pinned(home, db_home, build, history, sqlite_override)
+            return _prepare_pinned(home, db_home, build, history, sqlite_override, compatible_timestamps)
     except HistoricalEvidenceError as error:
         raise RepairError(str(error)) from None
     except (ValueError, OSError, sqlite3.Error):
         raise RepairError("desktop_ineligible") from None
 
 
+def _active_local_profile(home: Path, db_home: Path) -> bool:
+    override = os.environ.get("CODEX_HOME")
+    sqlite_override = os.environ.get("CODEX_SQLITE_HOME")
+    active_home = Path(override) if override else Path.home() / ".codex"
+    return home == db_home == active_home and (not sqlite_override or Path(sqlite_override) == home)
+
+
 def _prepare_pinned(home: Path, db_home: Path, build: str, history: Path | None,
-                    sqlite_override: Path | None) -> Plan:
+                    sqlite_override: Path | None, compatible_timestamps: bool) -> Plan:
     profile = _profile_identity(home)
     before, cache = read_cache(home)
+    scoped = history is not None and ACCOUNT_STATE in cache and _active_local_profile(home, db_home)
+    if history is not None and not scoped and build not in HISTORY_BUILDS:
+        raise RepairError("desktop_version")
     historical = _read_bytes(history) if history is not None else None
     with locked_config(home) as config:
         _check_database(home, db_home, config, sqlite_override)
-        with open_snapshot(db_home / STATE_NAME, allow_wal=build == RECENT_HISTORY_BUILD) as snapshot:
-            candidate, count, linked, skipped = _build_candidate(snapshot.connection, cache, historical, build)
+        with open_snapshot(db_home / STATE_NAME, allow_wal=scoped or build == RECENT_HISTORY_BUILD,
+                           allow_empty_wal=scoped) as snapshot:
+            if scoped:
+                candidate, count, linked, skipped = _scoped_registry_bytes(
+                    snapshot.connection, home, cache, historical,
+                )
+            else:
+                candidate, count, linked, skipped = _build_candidate(
+                    snapshot.connection, cache, historical, build, compatible_timestamps=compatible_timestamps,
+                )
     return Plan(
         home, db_home, digest(before), digest(candidate), count, build, snapshot.uses_wal, profile,
         linked, skipped, history, digest(historical) if historical is not None else "",
-        digest(config) if config is not None else None, sqlite_override,
+        digest(config) if config is not None else None, sqlite_override, compatible_timestamps, scoped,
     )
 
 
@@ -372,7 +508,14 @@ def prepare_restore(home: Path, store: Path, backup_id: str) -> RestorePlan:
 def apply(plan: Plan, store: Path, *, approved: bool) -> str:
     if not approved:
         raise RepairError("approval_required")
-    if plan.build not in (HISTORY_BUILDS if plan.history is not None else REGISTRY_BUILDS):
+    if plan.scoped_registry:
+        if (plan.history is None or plan.compatible_timestamps
+                or not _active_local_profile(plan.home, plan.db_home)):
+            raise RepairError("desktop_profile_mismatch")
+    elif plan.compatible_timestamps:
+        if plan.history is not None or not _active_local_profile(plan.home, plan.db_home):
+            raise RepairError("desktop_profile_mismatch")
+    elif plan.build not in (HISTORY_BUILDS if plan.history is not None else REGISTRY_BUILDS):
         raise RepairError("desktop_version")
     if plan.history is not None:
         _validate_history_path(plan.home, plan.history)
@@ -389,7 +532,8 @@ def apply(plan: Plan, store: Path, *, approved: bool) -> str:
                 _check_database(plan.home, plan.db_home, config, plan.sqlite_override)
                 state_path = plan.db_home / STATE_NAME
                 snapshot = guards.enter_context(open_snapshot(
-                    state_path, allow_wal=plan.build == RECENT_HISTORY_BUILD,
+                    state_path, allow_wal=plan.scoped_registry or plan.build == RECENT_HISTORY_BUILD,
+                    allow_empty_wal=plan.scoped_registry,
                 ))
                 if snapshot.uses_wal != plan.uses_wal:
                     raise RepairError("stale")
@@ -405,12 +549,23 @@ def apply(plan: Plan, store: Path, *, approved: bool) -> str:
                     history = _read_bounded(source)
                     if digest(history) != plan.history_hash:
                         raise RepairError("stale")
-                candidate, count, linked, skipped = _build_candidate(snapshot.connection, cache, history, plan.build)
+                if plan.scoped_registry:
+                    candidate, count, linked, skipped = _scoped_registry_bytes(
+                        snapshot.connection, plan.home, cache, history,
+                    )
+                else:
+                    candidate, count, linked, skipped = _build_candidate(
+                        snapshot.connection, cache, history, plan.build,
+                        compatible_timestamps=plan.compatible_timestamps,
+                    )
                 if (digest(candidate), count, linked, skipped) != (plan.after, plan.count, plan.linked, plan.skipped):
                     raise RepairError("stale")
                 folder = _safe_store(store, plan.home)
                 backup_id = _backup(folder, plan.home, before, plan.after)
                 _check_installed_build(plan.home, plan.db_home, plan.build)
+                if ((plan.compatible_timestamps or plan.scoped_registry)
+                        and not _active_local_profile(plan.home, plan.db_home)):
+                    raise RepairError("desktop_profile_mismatch")
                 journals = ("-journal",) if snapshot.uses_wal else ("-journal", "-wal", "-shm")
                 for suffix in journals:
                     _require_missing(state_path.with_name(state_path.name + suffix))

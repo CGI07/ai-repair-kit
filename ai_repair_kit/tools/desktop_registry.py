@@ -1,4 +1,4 @@
-"""Build two cache-only candidates from verified, version-specific evidence."""
+"""Prove cache-only recovery candidates against original project metadata."""
 
 import sqlite3
 from pathlib import Path
@@ -7,6 +7,7 @@ from ..local_files import ordinary_path
 from .desktop_catalog import (
     Unsupported, _rows, canonical_id, columns, legacy_keys, local_assignment_key, projects,
 )
+from .desktop_compatibility import ACCOUNT_STATE, MIGRATION
 from .desktop_history import ASSIGNMENTS, HOST_MAP, ORDER, PROJECTLESS, REGISTRY, _object, _string_list
 
 PARTIAL_REGISTRY_BUILD = "26.915.4065.0"
@@ -136,3 +137,131 @@ def _object_links(
     if not links:
         raise HistoricalEvidenceError("desktop_snapshot_no_links")
     return links, len(previous) - len(links)
+
+
+def scoped_registry_candidate(
+    db: sqlite3.Connection, home: Path, current: dict, historical: dict,
+) -> tuple[dict, int]:
+    """Prove missing registrations against a same-owner, pre-incident cache."""
+    if (ASSIGNMENTS in current) != (ASSIGNMENTS in historical) or current.get(ASSIGNMENTS) != historical.get(ASSIGNMENTS):
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    mapping, order, old, live, state = _scoped_projects(db, home, current, historical)
+    _scoped_threads(db, mapping, state, current)
+    missing = {alias: old[alias] for alias in order if alias not in live}
+    if not missing:
+        raise Unsupported("no missing project entries")
+    return {**current, REGISTRY: live | missing}, len(missing)
+
+
+def scoped_assignment_evidence(
+    db: sqlite3.Connection, home: Path, current: dict, historical: dict,
+) -> tuple[int, int]:
+    """Count missing values backed by a snapshot and explicit SQLite membership."""
+    mapping, _, old, live, state = _scoped_projects(db, home, current, historical)
+    if live != old:
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    current_links = _object(current, ASSIGNMENTS)
+    historical_links = _object(historical, ASSIGNMENTS)
+    if any(key not in historical_links or value != historical_links[key]
+           for key, value in current_links.items()):
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    threads = _scoped_threads(db, mapping, state, historical)
+    missing = historical_links.keys() - current_links.keys()
+    confirmed = sum(threads[key] == mapping[local_assignment_key(historical_links[key])] for key in missing)
+    return confirmed, len(missing) - confirmed
+
+
+def _scoped_projects(
+    db: sqlite3.Connection, home: Path, current: dict, historical: dict,
+) -> tuple[dict[str, str], list[str], dict, dict, dict]:
+    _require_identity_schema(db)
+    account = _object(current, ACCOUNT_STATE)
+    owner = account.get("owner")
+    if (account.keys() != {"owner", "inactive"} or not isinstance(owner, str)
+            or not 0 < len(owner) <= 512 or account["inactive"] != {}):
+        raise Unsupported("unverified active account scope")
+    for field in (ACCOUNT_STATE, HOST_MAP, MIGRATION, ORDER, PROJECTLESS):
+        if (field in current) != (field in historical) or current.get(field) != historical.get(field):
+            raise HistoricalEvidenceError("desktop_snapshot_conflict")
+
+    scope = f"local:{home}"
+    hosts = _object(current, HOST_MAP)
+    migration = _object(current, MIGRATION)
+    if hosts.keys() != {scope} or migration.keys() != {scope}:
+        raise Unsupported("unverified local scope")
+    state = _object(migration, scope)
+    if (state.keys() - {"version", "projectsMigrated", "threadAssignmentsMigrated",
+                       "threadAssignmentsReadMigrated", "pendingThreadAssignmentIds"}
+            or type(state.get("version")) is not int or state["version"] != 1
+            or state.get("projectsMigrated") is not True
+            or type(state.get("threadAssignmentsMigrated")) is not bool
+            or ("threadAssignmentsReadMigrated" in state
+                and type(state["threadAssignmentsReadMigrated"]) is not bool)):
+        raise Unsupported("unrecognized migration state")
+
+    catalog, aliases = projects(db), legacy_keys(db)
+    if not catalog or aliases.keys() != catalog.keys() or any(
+        len(keys) != 1 or not canonical_id(keys[0]) for keys in aliases.values()
+    ):
+        raise Unsupported("unverified original project identities")
+    mapping = {keys[0]: project for project, keys in aliases.items()}
+    if hosts[scope] != mapping:
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    order = _string_list(current, ORDER)
+    if len(order) != len(mapping) or set(order) != mapping.keys():
+        raise Unsupported("unverified project order")
+
+    old = _object(historical, REGISTRY)
+    live = current.get(REGISTRY)
+    if not isinstance(live, dict) or old.keys() != mapping.keys() or not live.keys() <= old.keys():
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    roots = set()
+    for alias, project_id in mapping.items():
+        project = catalog[project_id]
+        entry = old[alias]
+        identity_fields = {"id": alias, "name": project.name, "rootPaths": list(project.roots)}
+        # Desktop and App Server record their timestamps separately. Preserve
+        # the exact historical Desktop values rather than copying SQLite times.
+        if (not isinstance(entry, dict) or entry.keys() != identity_fields.keys() | {"createdAt", "updatedAt"}
+                or any(entry[key] != value for key, value in identity_fields.items()) or not project.roots
+                or any(type(entry[key]) is not int for key in ("createdAt", "updatedAt"))
+                or not 0 < entry["createdAt"] <= entry["updatedAt"] < 2**53
+                or (alias in live and (live[alias] != entry or any(
+                    type(live[alias][key]) is not int for key in ("createdAt", "updatedAt")
+                )))):
+            raise HistoricalEvidenceError("desktop_snapshot_conflict")
+        for root in project.roots:
+            info = ordinary_path(Path(root), directory=True)
+            identity = (info.st_dev, info.st_ino)
+            if identity in roots:
+                raise Unsupported("shared project root")
+            roots.add(identity)
+
+    return mapping, order, old, live, state
+
+
+def _scoped_threads(
+    db: sqlite3.Connection, mapping: dict[str, str], state: dict, cache: dict,
+) -> dict[str, str | None]:
+    columns_by_name = columns(db, "threads")
+    if (not {"id", "project_id"} <= columns_by_name.keys()
+            or {name: col[5] for name, col in columns_by_name.items() if col[5]} != {"id": 1}):
+        raise Unsupported("unverified thread identities")
+    threads = dict(_rows(db, "SELECT id, project_id FROM main.threads"))
+    assignments = _object(cache, ASSIGNMENTS)
+    projectless = _string_list(cache, PROJECTLESS)
+    pending = _string_list(state, "pendingThreadAssignmentIds")
+    catalog_ids = set(mapping.values())
+    if (any(not canonical_id(key) or (value is not None and value not in catalog_ids)
+            for key, value in threads.items())
+            or any(key not in threads or threads[key] is not None for key in projectless)
+            or len(set(projectless)) != len(projectless)
+            or len(set(pending)) != len(pending)
+            or any(key not in assignments and key not in projectless for key in pending)):
+        raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    for thread, value in assignments.items():
+        alias = local_assignment_key(value)
+        if (thread not in threads or thread in projectless or not isinstance(value, dict)
+                or alias not in mapping or threads[thread] not in (None, mapping[alias])):
+            raise HistoricalEvidenceError("desktop_snapshot_conflict")
+    return threads
