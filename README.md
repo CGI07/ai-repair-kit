@@ -1,3 +1,7 @@
+**Community:** [Discussions](https://github.com/CGI07/ai-repair-kit/discussions) · [Recovery feedback](https://github.com/CGI07/ai-repair-kit/discussions/3)
+
+**Support:** [Issues](https://github.com/CGI07/ai-repair-kit/issues)
+
 # AI Repair Kit — Codex Desktop missing projects and chats on Windows
 
 Did Codex Desktop show **No projects**, lose its project sidebar after an update, or stop showing older chats under their projects? AI Repair Kit is an independent Windows tool that checks local project registrations, chat links, and SQLite metadata to help explain what is missing.
